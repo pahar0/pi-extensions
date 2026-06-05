@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.74.0
+// Last verified working with Pi v0.78.1
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -61,6 +61,7 @@ type UIContextLike = {
 type BaseContextLike = {
   cwd: string;
   hasUI: boolean;
+  mode?: "tui" | "rpc" | "json" | "print";
   ui: UIContextLike;
   sessionManager: SessionManagerLike;
 };
@@ -742,7 +743,7 @@ export default function (pi: ExtensionAPI) {
     }
     programmaticTreeNavigationChoice = null;
 
-    if (!ctx.hasUI) return;
+    if (ctx.mode !== "tui") return;
 
     const targetEntry = (ctx as BaseContextLike).sessionManager.getEntry?.(targetId);
     if (!isSelectableUserMessageEntry(targetEntry)) return;
@@ -824,8 +825,8 @@ export default function (pi: ExtensionAPI) {
             return;
           }
         } else {
-          if (!commandCtx.hasUI) {
-            commandCtx.ui.notify("Use: /restore-files <entry-id>", "error");
+          if (commandCtx.mode !== "tui") {
+            if (commandCtx.hasUI) commandCtx.ui.notify("Use: /restore-files <entry-id>", "error");
             return;
           }
 
@@ -872,7 +873,7 @@ export default function (pi: ExtensionAPI) {
               files: row.files,
             }));
 
-          if (typeof commandCtx.ui.custom === "function") {
+          if (commandCtx.mode === "tui" && typeof commandCtx.ui.custom === "function") {
             const pickedIndex = await commandCtx.ui.custom<number>(
               (tui, theme, keybindings, done) => {
                 let selectedIndex = 0;
@@ -1035,7 +1036,7 @@ export default function (pi: ExtensionAPI) {
         const changedFiles =
           changeCount > 0 ? await listSnapshotChanges(commandCtx, targetSnapshot, compareCache) : [];
 
-        if (commandCtx.hasUI) {
+        if (commandCtx.mode === "tui") {
           const action = await chooseRestoreAction(commandCtx, targetEntry.id, changeCount);
           if (action === "cancel") return;
 

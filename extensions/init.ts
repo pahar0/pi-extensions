@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.74.0
+// Last verified working with Pi v0.78.1
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
 

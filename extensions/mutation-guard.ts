@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.74.0
+// Last verified working with Pi v0.78.1
 import { completeSimple } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
@@ -913,8 +913,8 @@ function renderWritePreviewUsingPi(
 	input: { path?: unknown; content?: unknown },
 	ctx: ExtensionContext,
 ): string {
-	if (!ctx.hasUI) {
-		return `Write ${normalizePath(input.path)} (UI unavailable for formatted preview)`;
+	if (ctx.mode !== "tui") {
+		return `Write ${normalizePath(input.path)} (TUI unavailable for formatted preview)`;
 	}
 
 	const writeDef = getWritePreviewToolDefinition(ctx.cwd);
@@ -1157,7 +1157,7 @@ async function promptForApproval(
 		let loadingFrame = 0;
 		let loadingTimer: ReturnType<typeof setInterval> | undefined;
 		let explanationPromise: Promise<string> | undefined;
-		const notes = ["", ""];
+		const notes = ["", "", ""];
 
 		const editorTheme: EditorTheme = {
 			borderColor: (s) => clearBlue(s),
@@ -1172,7 +1172,7 @@ async function promptForApproval(
 		const editor = new Editor(tui, editorTheme);
 		editor.onSubmit = (value) => {
 			notes[optionIndex] = value;
-			completeResult(optionIndex === 0 ? "allow" : "block");
+			completeResult(optionIndex === 2 ? "block" : "allow");
 		};
 		let cachedWidth = -1;
 		let cachedTopBorder = "";
@@ -1287,7 +1287,7 @@ async function promptForApproval(
 
 		function renderOption(index: number): string[] {
 			const selected = index === optionIndex;
-			const label = index === 0 ? "Yes" : "No";
+			const label = index === 0 ? "Yes" : index === 1 ? "Yes, and don't ask again" : "No";
 			const prefix = selected ? clearBlue("❯ ") : "  ";
 			const base = selected ? clearBlue(theme.bold(`${index + 1}. ${label}`)) : `${index + 1}. ${label}`;
 			const note = (notes[index] ?? "").trim();
@@ -1302,6 +1302,11 @@ async function promptForApproval(
 
 		function completeResult(actionName: "allow" | "block") {
 			const note = (notes[optionIndex] ?? "").trim();
+			if (optionIndex === 1 && actionName === "allow") {
+				if (autoAllow && !autoAllow.isEnabled()) autoAllow.toggle();
+				finish({ action: "allow", note: note.length > 0 ? note : undefined });
+				return;
+			}
 			if (actionName === "block" && note.length === 0) {
 				finish({ action: "abort" });
 				return;
@@ -1389,12 +1394,12 @@ async function promptForApproval(
 				}
 
 				if (keybindings.matches(data, "tui.select.up")) {
-					optionIndex = optionIndex === 0 ? 1 : optionIndex - 1;
+					optionIndex = optionIndex === 0 ? 2 : optionIndex - 1;
 					refresh();
 					return;
 				}
 				if (keybindings.matches(data, "tui.select.down")) {
-					optionIndex = optionIndex === 1 ? 0 : optionIndex + 1;
+					optionIndex = optionIndex === 2 ? 0 : optionIndex + 1;
 					refresh();
 					return;
 				}
@@ -1425,7 +1430,7 @@ async function promptForApproval(
 					return;
 				}
 				if (keybindings.matches(data, "tui.select.confirm")) {
-					completeResult(optionIndex === 0 ? "allow" : "block");
+					completeResult(optionIndex === 2 ? "block" : "allow");
 				}
 			},
 			render(width: number): string[] {
@@ -1450,6 +1455,7 @@ async function promptForApproval(
 					truncateToWidth(theme.fg("text", "Do you want to proceed?"), outerWidth),
 					...renderOption(0).map((line) => truncateToWidth(line, outerWidth)),
 					...renderOption(1).map((line) => truncateToWidth(line, outerWidth)),
+					...renderOption(2).map((line) => truncateToWidth(line, outerWidth)),
 				];
 				const rawExplanationLines = explanationVisible
 					? ["", ...getExplanationLines(outerWidth).map((line) => truncateToWidth(line, outerWidth))]
@@ -1508,9 +1514,14 @@ async function promptForApproval(
 
 	const selectChoice = await ctx.ui.select(`${title} — ${toolDescription}\n\n${preview}`, [
 		"Allow",
+		"Allow and don't ask again",
 		"Block",
 	]);
 	if (selectChoice === "Allow") return { action: "allow" };
+	if (selectChoice === "Allow and don't ask again") {
+		if (autoAllow && !autoAllow.isEnabled()) autoAllow.toggle();
+		return { action: "allow" };
+	}
 	return { action: "abort" };
 }
 
@@ -1518,7 +1529,7 @@ export default function fileMutationGuardExtension(pi: ExtensionAPI) {
 	let allowEnabled = false;
 
 	function updateStatus(ctx?: ExtensionContext): void {
-		if (!ctx?.hasUI) return;
+		if (ctx?.mode !== "tui") return;
 		const theme = ctx.ui.theme;
 		const value = allowEnabled ? theme.fg("warning", "accept") : theme.fg("dim", "ask");
 		ctx.ui.setStatus(STATUS_KEY, `${value} ${theme.fg("dim", `(${SHORTCUT})`)}`);
@@ -1534,7 +1545,7 @@ export default function fileMutationGuardExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
+		if (ctx.mode !== "tui") return;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 
@@ -1577,11 +1588,11 @@ export default function fileMutationGuardExtension(pi: ExtensionAPI) {
 			return undefined;
 		}
 
-		if (!ctx.hasUI) {
+		if (ctx.mode !== "tui") {
 			const subject = isFileToolAction(action) ? `${action} ${blockReasonTarget}` : blockReasonTarget;
 			return {
 				block: true,
-				reason: `${subject} blocked: confirmation requires UI. Do not attempt another mutation method. Ask the user why it was blocked.`,
+				reason: `${subject} blocked: confirmation requires TUI mode. Do not attempt another mutation method. Ask the user why it was blocked.`,
 			};
 		}
 

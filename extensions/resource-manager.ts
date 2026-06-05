@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.74.0
+// Last verified working with Pi v0.78.1
 // Generic resource manager for Pi extensions and skills.
 import { existsSync } from "node:fs";
 import { readdir, rename, rm } from "node:fs/promises";
@@ -396,6 +396,11 @@ async function reloadAndExit(ctx: ExtensionCommandContext, message: string): Pro
 }
 
 async function runManager(ctx: ExtensionCommandContext, config: ResourceConfig): Promise<void> {
+	if (ctx.mode !== "tui") {
+		if (ctx.hasUI) ctx.ui.notify(`${capitalize(config.type)} manager requires TUI mode`, "warning");
+		return;
+	}
+
 	while (true) {
 		const items = await scanAll(ctx.cwd, config);
 
@@ -502,6 +507,10 @@ export default function resourceManager(pi: ExtensionAPI) {
 	pi.registerCommand("resources", {
 		description: "Manage custom global and project extensions or skills",
 		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui") {
+				if (ctx.hasUI) ctx.ui.notify("Resource manager requires TUI mode", "warning");
+				return;
+			}
 			const label = await ctx.ui.select("Manage resources", ["Extensions", "Skills", "Back"]);
 			if (label === "Extensions") return runManager(ctx, configs[0]!);
 			if (label === "Skills") return runManager(ctx, configs[1]!);

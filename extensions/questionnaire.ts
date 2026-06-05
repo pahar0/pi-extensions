@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.74.0
+// Last verified working with Pi v0.78.1
 /**
  * Questionnaire Tool - Unified tool for asking single or multiple questions
  *
@@ -83,8 +83,8 @@ export default function questionnaire(pi: ExtensionAPI) {
 		parameters: QuestionnaireParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (!ctx.hasUI) {
-				return errorResult("Error: UI not available (running in non-interactive mode)");
+			if (ctx.mode !== "tui") {
+				return errorResult("Error: questionnaire requires TUI mode");
 			}
 			if (params.questions.length === 0) {
 				return errorResult("Error: No questions provided");
@@ -159,14 +159,54 @@ export default function questionnaire(pi: ExtensionAPI) {
 					return questions[currentTab];
 				}
 
-				function currentOptions(): RenderOption[] {
-					const q = currentQuestion();
+				function optionsForQuestion(q: Question | undefined): RenderOption[] {
 					if (!q) return [];
 					const opts: RenderOption[] = [...q.options];
 					if (q.allowOther) {
 						opts.push({ value: "__other__", label: "Type something.", isOther: true });
 					}
 					return opts;
+				}
+
+				function currentOptions(): RenderOption[] {
+					return optionsForQuestion(currentQuestion());
+				}
+
+				function answerOptionIndex(q: Question | undefined): number | undefined {
+					if (!q) return undefined;
+					const answer = answers.get(q.id);
+					if (!answer) return undefined;
+
+					const opts = optionsForQuestion(q);
+					if (answer.wasCustom) {
+						const otherIndex = opts.findIndex((opt) => opt.isOther === true);
+						return otherIndex >= 0 ? otherIndex : undefined;
+					}
+
+					if (typeof answer.index === "number") {
+						const savedIndex = answer.index - 1;
+						const savedOption = opts[savedIndex];
+						if (savedOption && !savedOption.isOther && savedOption.value === answer.value) return savedIndex;
+					}
+
+					const valueIndex = opts.findIndex((opt) => !opt.isOther && opt.value === answer.value);
+					return valueIndex >= 0 ? valueIndex : undefined;
+				}
+
+				function syncOptionIndexToCurrentAnswer() {
+					if (currentTab >= questions.length) {
+						optionIndex = 0;
+						return;
+					}
+
+					const opts = currentOptions();
+					if (opts.length === 0) {
+						optionIndex = 0;
+						return;
+					}
+
+					const savedIndex = answerOptionIndex(currentQuestion());
+					optionIndex = Math.max(0, Math.min(opts.length - 1, savedIndex ?? 0));
 				}
 
 				function allAnswered(): boolean {
@@ -183,7 +223,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 					} else {
 						currentTab = questions.length; // Submit tab
 					}
-					optionIndex = 0;
+					syncOptionIndexToCurrentAnswer();
 					refresh();
 				}
 
@@ -224,13 +264,13 @@ export default function questionnaire(pi: ExtensionAPI) {
 					if (isMulti) {
 						if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
 							currentTab = (currentTab + 1) % totalTabs;
-							optionIndex = 0;
+							syncOptionIndexToCurrentAnswer();
 							refresh();
 							return;
 						}
 						if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
 							currentTab = (currentTab - 1 + totalTabs) % totalTabs;
-							optionIndex = 0;
+							syncOptionIndexToCurrentAnswer();
 							refresh();
 							return;
 						}
@@ -261,10 +301,12 @@ export default function questionnaire(pi: ExtensionAPI) {
 					// Select option
 					if (matchesKey(data, Key.enter) && q) {
 						const opt = opts[optionIndex];
+						if (!opt) return;
 						if (opt.isOther) {
+							const previousAnswer = answers.get(q.id);
 							inputMode = true;
 							inputQuestionId = q.id;
-							editor.setText("");
+							editor.setText(previousAnswer?.wasCustom ? previousAnswer.label : "");
 							refresh();
 							return;
 						}
@@ -326,21 +368,30 @@ export default function questionnaire(pi: ExtensionAPI) {
 
 					// Helper to render options list
 					function renderOptions() {
+						const answer = q ? answers.get(q.id) : undefined;
+						const answeredIndex = answerOptionIndex(q);
+
 						for (let i = 0; i < opts.length; i++) {
 							const opt = opts[i];
 							const selected = i === optionIndex;
+							const isAnswered = i === answeredIndex;
 							const isOther = opt.isOther === true;
-							const prefix = selected ? theme.fg("accent", "> ") : "  ";
-							const color = selected ? "accent" : "text";
+							const cursor = selected ? theme.fg("accent", "> ") : "  ";
+							const marker = isAnswered ? theme.fg("success", "✓ ") : "  ";
+							const color = selected ? "accent" : isAnswered ? "success" : "text";
+							const customAnswer = answer?.wasCustom ? answer.label.replace(/\s+/g, " ").trim() : "";
+							const label = isOther && isAnswered && customAnswer ? `${opt.label} (${customAnswer})` : opt.label;
+							const prefix = cursor + marker;
+
 							// Mark "Type something" differently when in input mode
 							if (isOther && inputMode) {
-								add(prefix + theme.fg("accent", `${i + 1}. ${opt.label} ✎`));
+								add(prefix + theme.fg("accent", `${i + 1}. ${label} ✎`));
 							} else {
-								add(prefix + theme.fg(color, `${i + 1}. ${opt.label}`));
+								add(prefix + theme.fg(color, `${i + 1}. ${label}`));
 							}
 							if (opt.description) {
-								for (const line of wrapPlainText(opt.description, Math.max(1, width - 5))) {
-									add(`     ${theme.fg("muted", line)}`);
+								for (const line of wrapPlainText(opt.description, Math.max(1, width - 7))) {
+									add(`       ${theme.fg("muted", line)}`);
 								}
 							}
 						}

@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.74.0
+// Last verified working with Pi v0.78.1
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
@@ -47,6 +47,7 @@ type FooterTuiLike = {
 
 type FooterContextLike = {
 	hasUI?: boolean;
+	mode?: "tui" | "rpc" | "json" | "print";
 	cwd?: string;
 	model?: ModelLike;
 	modelRegistry: {
@@ -54,6 +55,7 @@ type FooterContextLike = {
 	};
 	sessionManager: {
 		getEntries: () => SessionEntryLike[];
+		getSessionName?: () => string | undefined;
 	};
 	getContextUsage: () => { contextWindow?: number; percent: number | null } | null | undefined;
 	ui: {
@@ -92,6 +94,10 @@ export default function statusWidget(pi: ExtensionAPI) {
 
 	function sanitizeStatusText(text: string): string {
 		return text.replace(/[\r\n]+/g, " ");
+	}
+
+	function currentSessionName(ctx: FooterContextLike): string {
+		return sanitizeStatusText(ctx.sessionManager.getSessionName?.() ?? "").trim();
 	}
 
 	function isAssistantUsageEntry(entry: SessionEntryLike): entry is { type: "message"; message: AssistantMessageLike } {
@@ -201,14 +207,18 @@ export default function statusWidget(pi: ExtensionAPI) {
 	}
 
 	function installFooter(ctx: FooterContextLike) {
-		if (!ctx?.hasUI) return;
+		if (ctx?.mode !== "tui") return;
 		ctx.ui.setFooter((tui: FooterTuiLike, theme: FooterThemeLike, footerData: FooterDataLike) => {
 			const dispose = footerData.onBranchChange(() => tui.requestRender());
 			return {
 				dispose,
 				render(width: number) {
+					const sessionLabel = currentSessionName(ctx);
 					const cwdLabel = formatCwd(ctx.cwd ?? "");
-					const left = cwdLabel ? theme.fg("accent", cwdLabel) : "";
+					const left = [
+						sessionLabel ? theme.fg("accent", sessionLabel) : "",
+						cwdLabel ? theme.fg("accent", cwdLabel) : "",
+					].filter(Boolean).join(` ${theme.fg("dim", "•")} `);
 					const middle = middleLabel(ctx, theme);
 					const right = rightLabel(ctx, theme, footerData);
 					if (!left && !middle) return [truncateToWidth(right, width)];
@@ -225,7 +235,7 @@ export default function statusWidget(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (event, ctx) => {
-		if (!ctx.hasUI) return;
+		if (ctx.mode !== "tui") return;
 		if (event.reason === "reload") return;
 		ctx.ui.setFooter(undefined);
 	});

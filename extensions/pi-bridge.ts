@@ -1,6 +1,7 @@
-// Last verified working with Pi v0.74.0
-import { complete } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+// Last verified working with Pi v0.78.1
+import { cleanupSessionResources, completeSimple } from "@earendil-works/pi-ai";
+import { BorderedLoader, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -43,6 +44,12 @@ type SessionEntry = {
 const ensureBridgeDir = () => fs.mkdirSync(BRIDGE_DIR, { recursive: true });
 
 const safeName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, "_");
+const oneLine = (text: string) => text.replace(/[\r\n]+/g, " ").trim();
+const formatPwd = (cwd?: string) => {
+	if (!cwd) return "unknown pwd";
+	const home = os.homedir();
+	return cwd === home ? "~" : cwd.startsWith(`${home}${path.sep}`) ? `~/${cwd.slice(home.length + 1)}` : cwd;
+};
 const inboxFile = (peerName: string) => path.join(BRIDGE_DIR, `${safeName(peerName)}.jsonl`);
 const now = () => Date.now();
 const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -144,15 +151,34 @@ const fallbackSummary = (conversation: string) => {
 	return `${trimmed.slice(0, 4_000)}\n\n...[conversation truncated]...\n\n${trimmed.slice(-8_000)}`;
 };
 
-const summarizeBranch = async (ctx: ExtensionContext, instructions?: string): Promise<string> => {
-	const conversation = buildConversationText(ctx.sessionManager.getBranch() as any);
-	if (!conversation.trim()) return "There is no conversation content to summarize.";
+type SummaryResult = { summary: string } | { cancelled: true };
 
-	const model = (ctx as any).model;
-	if (!model) return fallbackSummary(conversation);
+type SummarizeOptions = {
+	signal?: AbortSignal;
+};
+
+const getBridgeSummarySessionId = (ctx: ExtensionContext): string | undefined => {
+	const sessionId = ctx.sessionManager.getSessionId?.();
+	return sessionId ? `${sessionId}-pi-bridge` : undefined;
+};
+
+const isAbort = (error: unknown, signal?: AbortSignal): boolean => {
+	return signal?.aborted === true || (error instanceof Error && error.name === "AbortError");
+};
+
+const summarizeBranch = async (ctx: ExtensionContext, instructions?: string, options: SummarizeOptions = {}): Promise<SummaryResult> => {
+	const { signal } = options;
+	if (signal?.aborted) return { cancelled: true };
+
+	const conversation = buildConversationText(ctx.sessionManager.getBranch() as any);
+	if (!conversation.trim()) return { summary: "There is no conversation content to summarize." };
+
+	const model = ctx.model;
+	if (!model) return { summary: fallbackSummary(conversation) };
 
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (!auth.ok || !auth.apiKey) return fallbackSummary(conversation);
+	if (signal?.aborted) return { cancelled: true };
+	if (!auth.ok || !auth.apiKey) return { summary: fallbackSummary(conversation) };
 
 	const prompt = [
 		"Summarize this Pi session so its context can be handed off to another existing Pi session.",
@@ -166,19 +192,35 @@ const summarizeBranch = async (ctx: ExtensionContext, instructions?: string): Pr
 	].filter(Boolean).join("\n");
 
 	try {
-		const response = await complete(
+		const settings = SettingsManager.create(ctx.cwd);
+		const retry = settings.getProviderRetrySettings();
+		const response = await completeSimple(
 			model,
 			{ messages: [{ role: "user" as const, content: [{ type: "text" as const, text: prompt }], timestamp: Date.now() }] },
-			{ apiKey: auth.apiKey, headers: auth.headers, reasoningEffort: "medium" as any },
+			{
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+				signal,
+				reasoning: "medium",
+				transport: settings.getTransport(),
+				sessionId: getBridgeSummarySessionId(ctx),
+				thinkingBudgets: settings.getThinkingBudgets(),
+				timeoutMs: retry.timeoutMs,
+				maxRetries: retry.maxRetries,
+				maxRetryDelayMs: retry.maxRetryDelayMs,
+			},
 		);
+		if (response.stopReason === "aborted" || signal?.aborted) return { cancelled: true };
+		if (response.stopReason === "error") return { summary: fallbackSummary(conversation) };
 		const text = response.content
 			.filter((c: any) => c.type === "text")
 			.map((c: any) => c.text)
 			.join("\n")
 			.trim();
-		return text || fallbackSummary(conversation);
-	} catch {
-		return fallbackSummary(conversation);
+		return { summary: text || fallbackSummary(conversation) };
+	} catch (error) {
+		if (isAbort(error, signal)) return { cancelled: true };
+		return { summary: fallbackSummary(conversation) };
 	}
 };
 
@@ -196,17 +238,93 @@ const pickPeer = async (ctx: ExtensionContext, title: string, excludeName: strin
 		return undefined;
 	}
 	if (peers.length === 1) return peers[0].name;
-	if (!ctx.hasUI) return peers[0].name;
-	const choices = peers.map((p) => {
-		const label = readDisplayNameFromSessionFile(p.sessionFile) || p.displayName || p.name;
-		const location = p.cwd ? path.basename(p.cwd) : "unknown cwd";
-		const id = p.sessionId ? p.sessionId.slice(0, 8) : p.name;
-		return `${label}  (${location}, ${id})`;
+	if (ctx.mode !== "tui") return peers[0].name;
+	type PeerChoice = {
+		peer: Peer;
+		label: string;
+		bridgeName: string;
+		pwd: string;
+	};
+	const choices: PeerChoice[] = peers.map((p) => ({
+		peer: p,
+		label: oneLine(readDisplayNameFromSessionFile(p.sessionFile) || p.displayName || p.name),
+		bridgeName: p.name,
+		pwd: formatPwd(p.cwd),
+	}));
+
+	return await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
+		let selectedIndex = 0;
+		let scrollOffset = 0;
+		const maxVisible = Math.min(10, choices.length);
+
+		const clampScroll = () => {
+			if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+			if (selectedIndex >= scrollOffset + maxVisible) scrollOffset = selectedIndex - maxVisible + 1;
+			const maxOffset = Math.max(0, choices.length - maxVisible);
+			scrollOffset = Math.max(0, Math.min(scrollOffset, maxOffset));
+		};
+
+		const move = (delta: number) => {
+			selectedIndex = (selectedIndex + delta + choices.length) % choices.length;
+			clampScroll();
+		};
+
+		const renderPeer = (choice: PeerChoice, index: number, width: number): string[] => {
+			const selected = index === selectedIndex;
+			const prefix = selected ? theme.fg("accent", "→ ") : theme.fg("dim", "  ");
+			const label = selected ? theme.fg("accent", theme.bold(choice.label)) : theme.fg("text", choice.label);
+			const cwd = selected ? theme.fg("accent", choice.pwd) : theme.fg("muted", choice.pwd);
+			const bridge = theme.fg("muted", choice.bridgeName);
+			return [
+				truncateToWidth(`${prefix}${label} ${theme.fg("dim", "•")} ${cwd} ${theme.fg("dim", "• bridge")} ${bridge}`, width),
+			];
+		};
+
+		return {
+			render(width: number) {
+				const visibleChoices = choices.slice(scrollOffset, scrollOffset + maxVisible);
+				const border = theme.fg("accent", "─".repeat(Math.max(0, width)));
+				const lines = [
+					border,
+					truncateToWidth(` ${theme.fg("accent", theme.bold(title))} ${theme.fg("dim", `(${choices.length} live sessions)`)}`, width),
+					"",
+				];
+				for (let i = 0; i < visibleChoices.length; i++) {
+					const choice = visibleChoices[i];
+					if (choice) lines.push(...renderPeer(choice, scrollOffset + i, width));
+				}
+				if (choices.length > maxVisible) {
+					lines.push(theme.fg("dim", `  ${selectedIndex + 1}/${choices.length}`));
+				}
+				lines.push(
+					"",
+					truncateToWidth(theme.fg("dim", " ↑↓ navigate • enter select • esc cancel"), width),
+					border,
+				);
+				return lines.map((line) => truncateToWidth(line, width));
+			},
+			invalidate() {},
+			handleInput(data: string) {
+				if (keybindings.matches(data, "tui.select.up")) {
+					move(-1);
+					tui.requestRender();
+					return;
+				}
+				if (keybindings.matches(data, "tui.select.down")) {
+					move(1);
+					tui.requestRender();
+					return;
+				}
+				if (keybindings.matches(data, "tui.select.confirm")) {
+					done(choices[selectedIndex]?.peer.name);
+					return;
+				}
+				if (keybindings.matches(data, "tui.select.cancel")) {
+					done(undefined);
+				}
+			},
+		};
 	});
-	const choice = await ctx.ui.select(title, choices);
-	if (!choice) return undefined;
-	const index = choices.indexOf(choice);
-	return index >= 0 ? peers[index].name : undefined;
 };
 
 export default function (pi: ExtensionAPI) {
@@ -307,10 +425,12 @@ export default function (pi: ExtensionAPI) {
 		latestCtx = ctx;
 		currentName = getLatestAlias(ctx) ?? defaultName(ctx);
 		restartRuntime();
-		if (ctx.hasUI) ctx.ui.setStatus("pi-bridge", currentName);
+		if (ctx.mode === "tui") ctx.ui.setStatus("pi-bridge", ctx.ui.theme.fg("dim", currentName));
 	});
 
 	pi.on("session_shutdown", async () => {
+		const summarySessionId = latestCtx ? getBridgeSummarySessionId(latestCtx) : undefined;
+		if (summarySessionId) cleanupSessionResources(summarySessionId);
 		if (heartbeat) clearInterval(heartbeat);
 		if (poller) clearInterval(poller);
 		heartbeat = undefined;
@@ -329,8 +449,8 @@ export default function (pi: ExtensionAPI) {
 			latestCtx = ctx;
 			pi.appendEntry("pi-bridge", { name });
 			restartRuntime();
-			ctx.ui.setStatus("pi-bridge", currentName);
-			ctx.ui.notify(`pi-bridge is ready as "${currentName}"`, "success");
+			if (ctx.mode === "tui") ctx.ui.setStatus("pi-bridge", ctx.ui.theme.fg("dim", currentName));
+			if (ctx.hasUI) ctx.ui.notify(`pi-bridge is ready as "${currentName}"`, "success");
 		},
 	});
 
@@ -371,9 +491,30 @@ export default function (pi: ExtensionAPI) {
 				instructions = trimmed;
 			}
 			if (!target) return;
-			ctx.ui.notify("Generating pi-bridge summary...", "info");
-			const summary = await summarizeBranch(ctx, instructions);
-			sendToPeer(target, "summary", summary);
+
+			const result = ctx.mode === "tui"
+				? await ctx.ui.custom<SummaryResult>((tui, theme, _keybindings, done) => {
+					const loader = new BorderedLoader(tui, theme, "Generating pi-bridge summary...");
+					let finished = false;
+					const finish = (value: SummaryResult) => {
+						if (finished) return;
+						finished = true;
+						done(value);
+					};
+					loader.onAbort = () => finish({ cancelled: true });
+					void summarizeBranch(ctx, instructions, { signal: loader.signal })
+						.then(finish)
+						.catch((error) => finish(isAbort(error, loader.signal) ? { cancelled: true } : { summary: "Unable to generate a pi-bridge summary." }));
+					return loader;
+				})
+				: await summarizeBranch(ctx, instructions);
+
+			if ("cancelled" in result) {
+				ctx.ui.notify("pi-bridge summary cancelled", "info");
+				return;
+			}
+
+			sendToPeer(target, "summary", result.summary);
 			ctx.ui.notify(`Summary sent to ${target}`, "success");
 		},
 	});
