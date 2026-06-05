@@ -107,6 +107,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 				let inputMode = false;
 				let inputQuestionId: string | null = null;
 				let cachedLines: string[] | undefined;
+				let cachedWidth = -1;
 				const answers = new Map<string, Answer>();
 
 				function wrapPlainText(text: string, maxWidth: number): string[] {
@@ -148,6 +149,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 				// Helpers
 				function refresh() {
 					cachedLines = undefined;
+					cachedWidth = -1;
 					tui.requestRender();
 				}
 
@@ -322,7 +324,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 				}
 
 				function render(width: number): string[] {
-					if (cachedLines) return cachedLines;
+					if (cachedLines && cachedWidth === width) return cachedLines;
 
 					const lines: string[] = [];
 					const q = currentQuestion();
@@ -405,7 +407,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 						renderOptions();
 						lines.push("");
 						add(theme.fg("muted", " Your answer:"));
-						for (const line of editor.render(width - 2)) {
+						for (const line of editor.render(Math.max(1, width - 2))) {
 							add(` ${line}`);
 						}
 						lines.push("");
@@ -445,6 +447,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 					}
 					add(theme.fg("accent", "─".repeat(width)));
 
+					cachedWidth = width;
 					cachedLines = lines;
 					return lines;
 				}
@@ -453,6 +456,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 					render,
 					invalidate: () => {
 						cachedLines = undefined;
+						cachedWidth = -1;
 					},
 					handleInput,
 				};

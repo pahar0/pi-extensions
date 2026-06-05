@@ -1,5 +1,6 @@
 // Last verified working with Pi v0.78.1
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { chmod, copyFile, mkdir, readdir, realpath, stat, unlink } from "node:fs/promises";
@@ -919,8 +920,8 @@ export default function (pi: ExtensionAPI) {
                     }
                   },
                   render(width: number): string[] {
-                    const outerWidth = Math.max(30, width);
-                    const innerWidth = Math.max(10, outerWidth - 4);
+                    const outerWidth = Math.max(1, width);
+                    const innerWidth = Math.max(1, outerWidth - 4);
 
                     const padPlain = (text: string, w: number): string => {
                       const t = truncatePlain(text, w);
@@ -1004,7 +1005,7 @@ export default function (pi: ExtensionAPI) {
                     }
 
                     lines.push(theme.fg("accent", `└${"─".repeat(Math.max(0, outerWidth - 2))}┘`));
-                    return lines;
+                    return lines.map((line) => truncateToWidth(line, width));
                   },
                 };
               },

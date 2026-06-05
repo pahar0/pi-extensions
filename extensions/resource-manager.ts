@@ -242,8 +242,8 @@ async function selectManagedResource(
 
 		return {
 			render(width: number): string[] {
-				const outerWidth = Math.max(30, width);
-				const innerWidth = Math.max(10, outerWidth - 4);
+				const outerWidth = Math.max(1, width);
+				const innerWidth = Math.max(1, outerWidth - 4);
 				const hint = "↑↓ navigate • enter select • esc cancel";
 				const fixedChromeLines = 4;
 				const fixedBodyLines = 2;
@@ -308,7 +308,7 @@ async function selectManagedResource(
 
 				lines.push(theme.fg("accent", "│ ") + theme.fg("dim", padPlain(hint, innerWidth)) + theme.fg("accent", " │"));
 				lines.push(theme.fg("accent", `└${"─".repeat(Math.max(0, outerWidth - 2))}┘`));
-				return lines;
+				return lines.map((line) => truncateToWidth(line, width));
 			},
 			invalidate() {},
 			handleInput(data: string) {
