@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.78.1
+// Last verified working with Pi v0.80.3
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
@@ -231,6 +231,10 @@ export default function statusWidget(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", (_event, ctx) => {
+		installFooter(ctx);
+	});
+
+	pi.on("session_info_changed", (_event, ctx) => {
 		installFooter(ctx);
 	});
 

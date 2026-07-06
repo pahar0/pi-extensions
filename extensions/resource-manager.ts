@@ -1,10 +1,10 @@
-// Last verified working with Pi v0.78.1
+// Last verified working with Pi v0.80.3
 // Generic resource manager for Pi extensions and skills.
 import { existsSync } from "node:fs";
 import { readdir, rename, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
 type Scope = "global" | "project";
@@ -48,7 +48,7 @@ function getGlobalExtensionsDir(): string {
 }
 
 function getProjectExtensionsDir(cwd: string): string {
-	return join(cwd, ".pi", "extensions");
+	return join(cwd, CONFIG_DIR_NAME, "extensions");
 }
 
 function getGlobalSkillsDir(): string {
@@ -56,7 +56,7 @@ function getGlobalSkillsDir(): string {
 }
 
 function getProjectSkillsDir(cwd: string): string {
-	return join(cwd, ".pi", "skills");
+	return join(cwd, CONFIG_DIR_NAME, "skills");
 }
 
 async function scanExtensions(baseDir: string, scope: Scope, config: ResourceConfig): Promise<ManagedResource[]> {

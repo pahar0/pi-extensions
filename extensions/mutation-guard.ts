@@ -1,5 +1,5 @@
-// Last verified working with Pi v0.78.1
-import { completeSimple } from "@earendil-works/pi-ai";
+// Last verified working with Pi v0.80.3
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,

@@ -1,5 +1,5 @@
-// Last verified working with Pi v0.78.1
-import { cleanupSessionResources, completeSimple } from "@earendil-works/pi-ai";
+// Last verified working with Pi v0.80.3
+import { cleanupSessionResources, completeSimple } from "@earendil-works/pi-ai/compat";
 import { BorderedLoader, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
@@ -425,6 +425,12 @@ export default function (pi: ExtensionAPI) {
 		latestCtx = ctx;
 		currentName = getLatestAlias(ctx) ?? defaultName(ctx);
 		restartRuntime();
+		if (ctx.mode === "tui") ctx.ui.setStatus("pi-bridge", ctx.ui.theme.fg("dim", currentName));
+	});
+
+	pi.on("session_info_changed", async (_event, ctx) => {
+		latestCtx = ctx;
+		registerSelf();
 		if (ctx.mode === "tui") ctx.ui.setStatus("pi-bridge", ctx.ui.theme.fg("dim", currentName));
 	});
 
