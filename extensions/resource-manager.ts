@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
-type Scope = "global" | "project";
+type Scope = "global" | "project" | "package";
 type Kind = "file" | "directory";
 type Status = "enabled" | "disabled";
 type ResourceType = "extension" | "skill";
@@ -172,20 +172,55 @@ function sortResources(items: ManagedResource[]): ManagedResource[] {
 	});
 }
 
+async function scanPackageResourceDirs(type: ResourceType): Promise<string[]> {
+	const agentDir = getAgentDir();
+	const conventionalDir = type === "extension" ? "extensions" : "skills";
+	const roots = [join(agentDir, "git"), join(agentDir, "npm")];
+	const dirs: string[] = [];
+	const seen = new Set<string>();
+
+	async function visit(dir: string, depth: number): Promise<void> {
+		if (!existsSync(dir) || depth < 0) return;
+
+		const resourceDir = join(dir, conventionalDir);
+		if (existsSync(resourceDir) && !seen.has(resourceDir)) {
+			seen.add(resourceDir);
+			dirs.push(resourceDir);
+		}
+
+		let dirents;
+		try {
+			dirents = await readdir(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+
+		for (const dirent of dirents) {
+			if (!dirent.isDirectory() || dirent.name === ".git" || dirent.name === "node_modules") continue;
+			await visit(join(dir, dirent.name), depth - 1);
+		}
+	}
+
+	for (const root of roots) await visit(root, 4);
+	return dirs;
+}
+
 async function scanAll(cwd: string, config: ResourceConfig): Promise<ManagedResource[]> {
-	const [globalItems, projectItems] = await Promise.all([
+	const packageDirs = await scanPackageResourceDirs(config.type);
+	const [globalItems, projectItems, packageItemGroups] = await Promise.all([
 		config.scan(config.globalDir(), "global", config),
 		config.scan(config.projectDir(cwd), "project", config),
+		Promise.all(packageDirs.map((dir) => config.scan(dir, "package", config))),
 	]);
-	const items = sortResources([...globalItems, ...projectItems]);
+	const items = sortResources([...globalItems, ...projectItems, ...packageItemGroups.flat()]);
 	return config.isHidden ? items.filter((item) => !config.isHidden!(item)) : items;
 }
 
 function getDisplayFields(item: ManagedResource): { name: string; status: string; scope: string; kind: string } {
 	return {
-		name: item.name,
+		name: item.scope === "package" ? `${item.name} (${basename(item.path)})` : item.name,
 		status: item.status === "enabled" ? "ON" : "OFF",
-		scope: item.scope === "global" ? "global" : "project",
+		scope: item.scope,
 		kind: item.kind === "file" ? "file" : "dir",
 	};
 }
