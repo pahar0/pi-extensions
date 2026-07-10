@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.80.3
+// Last verified working with Pi v0.80.6
 import { CustomEditor, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type UserMessage = {

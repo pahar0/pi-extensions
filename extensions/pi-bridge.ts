@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.80.3
+// Last verified working with Pi v0.80.6
 import { cleanupSessionResources, completeSimple } from "@earendil-works/pi-ai/compat";
 import { BorderedLoader, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
