@@ -66,7 +66,7 @@ type FooterContextLike = {
 	};
 };
 
-export default function statusWidget(pi: ExtensionAPI) {
+export default function statusFooter(pi: ExtensionAPI) {
 
 	function formatTokens(n: number): string {
 		return n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`;
@@ -76,6 +76,30 @@ export default function statusWidget(pi: ExtensionAPI) {
 		if (!path) return "";
 		const home = homedir();
 		return path === home ? "~" : path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
+	}
+
+	function compactCwd(path: string, maxWidth: number): string {
+		const formatted = formatCwd(path);
+		if (!formatted || maxWidth <= 0) return "";
+		if (visibleWidth(formatted) <= maxWidth) return formatted;
+
+		const prefix = formatted.startsWith("~/") ? "~/" : formatted.startsWith("/") ? "/" : "";
+		const body = formatted.slice(prefix.length);
+		const parts = body.split("/").filter(Boolean);
+		const marker = `${prefix}…/`;
+		const available = maxWidth - visibleWidth(marker);
+
+		if (parts.length === 0 || available < 4) return truncateToWidth(formatted, maxWidth);
+
+		let suffix = "";
+		for (let i = parts.length - 1; i >= 0; i--) {
+			const candidate = suffix ? `${parts[i]}/${suffix}` : parts[i];
+			if (visibleWidth(candidate) > available) break;
+			suffix = candidate;
+		}
+
+		if (!suffix) suffix = truncateToWidth(parts[parts.length - 1], available);
+		return `${marker}${suffix}`;
 	}
 
 	function currentModelLabel(ctx: FooterContextLike): string {
@@ -146,9 +170,10 @@ export default function statusWidget(pi: ExtensionAPI) {
 			return clamp(left + " ".repeat(leftPad) + mid + " ".repeat(rightPad) + right);
 		}
 
-		const availableForRight = Math.max(0, width - lw);
+		const availableForRight = Math.max(0, width - lw - 1);
 		const truncatedRight = availableForRight > 0 ? truncateToWidth(right, availableForRight) : "";
-		const pad = Math.max(0, width - lw - visibleWidth(truncatedRight));
+		if (!truncatedRight) return clamp(left);
+		const pad = Math.max(1, width - lw - visibleWidth(truncatedRight));
 		return clamp(left + " ".repeat(pad) + truncatedRight);
 	}
 
@@ -215,7 +240,8 @@ export default function statusWidget(pi: ExtensionAPI) {
 				dispose,
 				render(width: number) {
 					const sessionLabel = currentSessionName(ctx);
-					const cwdLabel = formatCwd(ctx.cwd ?? "");
+					const cwdMaxWidth = Math.max(8, Math.min(40, Math.floor(width * 0.3)));
+					const cwdLabel = compactCwd(ctx.cwd ?? "", cwdMaxWidth);
 					const left = [
 						sessionLabel ? theme.fg("accent", sessionLabel) : "",
 						cwdLabel ? theme.fg("accent", cwdLabel) : "",

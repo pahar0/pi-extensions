@@ -20,4 +20,4 @@ Pi will load the conventional `extensions/` directory from this repository as a 
 | `mutation-guard` | Prompts for approval before file edits, writes, and risky shell mutations. |
 | `resource-manager` | Adds commands for enabling, disabling, and uninstalling custom extensions and skills. |
 | `restore-files` | Tracks file checkpoints and can restore code alongside conversation tree navigation. |
-| `status-widget` | Replaces the footer with cwd, usage, context, model, thinking, and extension status info. |
+| `status-footer` | Replaces the footer with cwd, usage, context, model, thinking, and extension status info. |
