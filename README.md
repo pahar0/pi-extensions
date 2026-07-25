@@ -1,6 +1,6 @@
 # Pi Extensions
 
-Personal extensions for the [Pi coding agent](https://pi.dev/).
+Personal extensions and skills for the [Pi coding agent](https://pi.dev/).
 
 ## Installation
 
@@ -10,7 +10,7 @@ Install globally with Pi's package manager:
 pi install git:github.com/pahar0/pi-extensions
 ```
 
-Pi loads the root-level extension files declared by the package manifest. If Pi is already running, use `/reload` or restart Pi after installing.
+Pi loads the extensions and skills declared by the package manifest. If Pi is already running, use `/reload` or restart Pi after installing.
 
 ## Extensions
 
@@ -21,3 +21,9 @@ Pi loads the root-level extension files declared by the package manifest. If Pi 
 | `resource-manager` | Adds commands for enabling, disabling, and uninstalling custom extensions and skills. |
 | `restore-files` | Tracks file checkpoints and can restore code alongside conversation tree navigation. |
 | `status-footer` | Replaces the footer with cwd, usage, context, model, thinking, and extension status info. |
+
+## Skills
+
+| Skill | Description |
+| --- | --- |
+| `brave-search` | Searches the web with Brave Search and extracts readable page content. |
