@@ -10,7 +10,7 @@ Install globally with Pi's package manager:
 pi install git:github.com/pahar0/pi-extensions
 ```
 
-Pi will load the conventional `extensions/` directory from this repository as a package. If Pi is already running, use `/reload` or restart Pi after installing.
+Pi loads the root-level extension files declared by the package manifest. If Pi is already running, use `/reload` or restart Pi after installing.
 
 ## Extensions
 
