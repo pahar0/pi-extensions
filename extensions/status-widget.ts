@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.80.6
+// Last verified working with Pi v0.82.0
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
@@ -9,7 +9,7 @@ type ModelLike = {
 	contextWindow?: number;
 };
 
-type AssistantUsageLike = {
+type UsageLike = {
 	input: number;
 	output: number;
 	cacheRead: number;
@@ -17,20 +17,11 @@ type AssistantUsageLike = {
 	cost: { total: number };
 };
 
-type AssistantMessageLike = {
-	role: "assistant";
-	usage: AssistantUsageLike;
+type SessionEntryLike = {
+	type: string;
+	message?: { role?: string; usage?: UsageLike };
+	usage?: UsageLike;
 };
-
-type SessionEntryLike =
-	| {
-			type: "message";
-			message?: AssistantMessageLike | { role?: string; usage?: AssistantUsageLike };
-	  }
-	| {
-			type: string;
-			message?: { role?: string; usage?: AssistantUsageLike };
-	  };
 
 type FooterThemeLike = {
 	fg: (token: string, text: string) => string;
@@ -100,8 +91,17 @@ export default function statusWidget(pi: ExtensionAPI) {
 		return sanitizeStatusText(ctx.sessionManager.getSessionName?.() ?? "").trim();
 	}
 
-	function isAssistantUsageEntry(entry: SessionEntryLike): entry is { type: "message"; message: AssistantMessageLike } {
-		return entry.type === "message" && entry.message?.role === "assistant" && entry.message.usage !== undefined;
+	function getEntryUsage(entry: SessionEntryLike): UsageLike | undefined {
+		if (
+			entry.type === "message" &&
+			(entry.message?.role === "assistant" || entry.message?.role === "toolResult")
+		) {
+			return entry.message.usage;
+		}
+		if (entry.type === "compaction" || entry.type === "branch_summary") {
+			return entry.usage;
+		}
+		return undefined;
 	}
 
 	function rightLabel(ctx: FooterContextLike, theme: FooterThemeLike, footerData: FooterDataLike): string {
@@ -173,12 +173,13 @@ export default function statusWidget(pi: ExtensionAPI) {
 		let totalCost = 0;
 
 		for (const entry of ctx.sessionManager.getEntries()) {
-			if (!isAssistantUsageEntry(entry)) continue;
-			totalInput += entry.message.usage.input;
-			totalOutput += entry.message.usage.output;
-			totalCacheRead += entry.message.usage.cacheRead;
-			totalCacheWrite += entry.message.usage.cacheWrite;
-			totalCost += entry.message.usage.cost.total;
+			const usage = getEntryUsage(entry);
+			if (!usage) continue;
+			totalInput += usage.input;
+			totalOutput += usage.output;
+			totalCacheRead += usage.cacheRead;
+			totalCacheWrite += usage.cacheWrite;
+			totalCost += usage.cost.total;
 		}
 
 		const parts: string[] = [];

@@ -1,5 +1,5 @@
-// Last verified working with Pi v0.80.6
-import { completeSimple } from "@earendil-works/pi-ai/compat";
+// Last verified working with Pi v0.82.0
+import { completeSimple, type Usage } from "@earendil-works/pi-ai/compat";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -977,6 +977,45 @@ type ApprovalResult = {
 	note?: string;
 };
 
+type ToolExplanationResult = {
+	text: string;
+	usage?: Usage;
+};
+
+type ApprovalControls = {
+	isEnabled: () => boolean;
+	toggle: () => void;
+	onExplanationStart?: (usage: Promise<Usage | undefined>) => void;
+};
+
+function combineUsage(existing: Usage | undefined, addition: Usage): Usage {
+	if (!existing) return addition;
+
+	const combined: Usage = {
+		input: existing.input + addition.input,
+		output: existing.output + addition.output,
+		cacheRead: existing.cacheRead + addition.cacheRead,
+		cacheWrite: existing.cacheWrite + addition.cacheWrite,
+		totalTokens: existing.totalTokens + addition.totalTokens,
+		cost: {
+			input: existing.cost.input + addition.cost.input,
+			output: existing.cost.output + addition.cost.output,
+			cacheRead: existing.cost.cacheRead + addition.cost.cacheRead,
+			cacheWrite: existing.cost.cacheWrite + addition.cost.cacheWrite,
+			total: existing.cost.total + addition.cost.total,
+		},
+	};
+
+	if (existing.cacheWrite1h !== undefined || addition.cacheWrite1h !== undefined) {
+		combined.cacheWrite1h = (existing.cacheWrite1h ?? 0) + (addition.cacheWrite1h ?? 0);
+	}
+	if (existing.reasoning !== undefined || addition.reasoning !== undefined) {
+		combined.reasoning = (existing.reasoning ?? 0) + (addition.reasoning ?? 0);
+	}
+
+	return combined;
+}
+
 function getPromptTitle(action: GuardedAction): string {
 	if (action === "create-command") return "Confirm file creation command";
 	if (action === "delete-command") return "Confirm deletion command";
@@ -1061,18 +1100,18 @@ async function generateToolExplanation(
 	toolDescription: string,
 	preview: string,
 	ctx: ExtensionContext,
-): Promise<string> {
+): Promise<ToolExplanationResult> {
 	const model = ctx.model;
 	if (!model) {
-		return "Explanation unavailable: no model is currently selected.";
+		return { text: "Explanation unavailable: no model is currently selected." };
 	}
 
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (auth.ok === false) {
-		return `Explanation unavailable: ${auth.error}`;
+		return { text: `Explanation unavailable: ${auth.error}` };
 	}
 	if (!auth.apiKey) {
-		return `Explanation unavailable: no API key available for ${model.provider}/${model.id}.`;
+		return { text: `Explanation unavailable: no API key available for ${model.provider}/${model.id}.` };
 	}
 
 	const prompt = [
@@ -1124,7 +1163,7 @@ async function generateToolExplanation(
 
 	if (response.stopReason === "error" || response.stopReason === "aborted") {
 		const message = response.errorMessage?.trim() || `request ended with ${response.stopReason}`;
-		return `Explanation unavailable: ${message}`;
+		return { text: `Explanation unavailable: ${message}`, usage: response.usage };
 	}
 
 	const text = response.content
@@ -1133,7 +1172,10 @@ async function generateToolExplanation(
 		.filter((block) => block.length > 0)
 		.join("\n\n");
 
-	return text || "Explanation unavailable: the model returned an empty response.";
+	return {
+		text: text || "Explanation unavailable: the model returned an empty response.",
+		usage: response.usage,
+	};
 }
 
 async function promptForApproval(
@@ -1141,7 +1183,7 @@ async function promptForApproval(
 	toolDescription: string,
 	preview: string,
 	ctx: ExtensionContext,
-	autoAllow?: { isEnabled: () => boolean; toggle: () => void },
+	autoAllow?: ApprovalControls,
 ): Promise<ApprovalResult> {
 	const title = getPromptTitle(action);
 	const baseLines = trimLeadingEmptyLines(preview).replace(/\t/g, "    ").split("\n");
@@ -1156,7 +1198,7 @@ async function promptForApproval(
 		let explanationError: string | undefined;
 		let loadingFrame = 0;
 		let loadingTimer: ReturnType<typeof setInterval> | undefined;
-		let explanationPromise: Promise<string> | undefined;
+		let explanationPromise: Promise<ToolExplanationResult> | undefined;
 		const notes = ["", "", ""];
 
 		const editorTheme: EditorTheme = {
@@ -1324,11 +1366,16 @@ async function promptForApproval(
 				loadingFrame = 0;
 				startLoadingAnimation();
 				refresh();
-				explanationPromise ??= generateToolExplanation(action, toolDescription, preview, ctx);
+				if (!explanationPromise) {
+					explanationPromise = generateToolExplanation(action, toolDescription, preview, ctx);
+					autoAllow?.onExplanationStart?.(
+						explanationPromise.then((result) => result.usage).catch(() => undefined),
+					);
+				}
 				void explanationPromise
-					.then((text) => {
+					.then((result) => {
 						if (!active) return;
-						explanationText = text;
+						explanationText = result.text;
 						explanationError = undefined;
 					})
 					.catch((error: unknown) => {
@@ -1527,6 +1574,7 @@ async function promptForApproval(
 
 export default function fileMutationGuardExtension(pi: ExtensionAPI) {
 	let allowEnabled = false;
+	const pendingExplanationUsage = new Map<string, Promise<Usage | undefined>>();
 
 	function updateStatus(ctx?: ExtensionContext): void {
 		if (ctx?.mode !== "tui") return;
@@ -1545,8 +1593,13 @@ export default function fileMutationGuardExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		pendingExplanationUsage.clear();
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
+	});
+
+	pi.on("agent_settled", async () => {
+		pendingExplanationUsage.clear();
 	});
 
 	pi.registerShortcut(SHORTCUT, {
@@ -1601,6 +1654,7 @@ export default function fileMutationGuardExtension(pi: ExtensionAPI) {
 		const choice = await promptForApproval(action, toolDescription, preview, ctx, {
 			isEnabled: () => allowEnabled,
 			toggle: () => setAllowEnabled(!allowEnabled, ctx),
+			onExplanationStart: (usage) => pendingExplanationUsage.set(event.toolCallId, usage),
 		});
 
 		if (choice.action === "allow") {
@@ -1630,5 +1684,16 @@ export default function fileMutationGuardExtension(pi: ExtensionAPI) {
 					? `Blocked this specific tool call for ${blockedSubject}. Adjust it according to the user's note and try again if appropriate. User note: ${blockedMessage}`
 					: `Blocked by user: ${blockedSubject}`,
 		};
+	});
+
+	pi.on("tool_result", async (event) => {
+		const usagePromise = pendingExplanationUsage.get(event.toolCallId);
+		if (!usagePromise) return;
+
+		pendingExplanationUsage.delete(event.toolCallId);
+		const explanationUsage = await usagePromise;
+		if (!explanationUsage) return;
+
+		return { usage: combineUsage(event.usage, explanationUsage) };
 	});
 }

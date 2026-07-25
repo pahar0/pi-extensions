@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.80.6
+// Last verified working with Pi v0.82.0
 // Generic resource manager for Pi extensions and skills.
 import { existsSync } from "node:fs";
 import { readdir, rename, rm } from "node:fs/promises";
