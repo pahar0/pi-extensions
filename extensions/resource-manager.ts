@@ -1,10 +1,16 @@
-// Last verified working with Pi v0.82.0
+// Last verified working with Pi v0.82.1
 // Generic resource manager for Pi extensions and skills.
 import { existsSync } from "node:fs";
 import { readdir, rename, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+	CONFIG_DIR_NAME,
+	DefaultPackageManager,
+	getAgentDir,
+	SettingsManager,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
 type Scope = "global" | "project" | "package";
@@ -172,12 +178,25 @@ function sortResources(items: ManagedResource[]): ManagedResource[] {
 	});
 }
 
-async function scanPackageResourceDirs(type: ResourceType): Promise<string[]> {
+async function scanPackageResourceDirs(cwd: string, projectTrusted: boolean, type: ResourceType): Promise<string[]> {
 	const agentDir = getAgentDir();
 	const conventionalDir = type === "extension" ? "extensions" : "skills";
-	const roots = [join(agentDir, "git"), join(agentDir, "npm")];
+	const roots: Array<{ path: string; depth: number }> = [
+		{ path: join(agentDir, "git"), depth: 4 },
+		{ path: join(agentDir, "npm"), depth: 4 },
+	];
 	const dirs: string[] = [];
 	const seen = new Set<string>();
+
+	try {
+		const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
+		for (const pkg of packageManager.listConfiguredPackages()) {
+			if (pkg.installedPath) roots.push({ path: pkg.installedPath, depth: 0 });
+		}
+	} catch {
+		// Keep the conventional npm/git fallback if package settings cannot be read.
+	}
 
 	async function visit(dir: string, depth: number): Promise<void> {
 		if (!existsSync(dir) || depth < 0) return;
@@ -201,12 +220,12 @@ async function scanPackageResourceDirs(type: ResourceType): Promise<string[]> {
 		}
 	}
 
-	for (const root of roots) await visit(root, 4);
+	for (const root of roots) await visit(root.path, root.depth);
 	return dirs;
 }
 
-async function scanAll(cwd: string, config: ResourceConfig): Promise<ManagedResource[]> {
-	const packageDirs = await scanPackageResourceDirs(config.type);
+async function scanAll(cwd: string, projectTrusted: boolean, config: ResourceConfig): Promise<ManagedResource[]> {
+	const packageDirs = await scanPackageResourceDirs(cwd, projectTrusted, config.type);
 	const [globalItems, projectItems, packageItemGroups] = await Promise.all([
 		config.scan(config.globalDir(), "global", config),
 		config.scan(config.projectDir(cwd), "project", config),
@@ -218,7 +237,7 @@ async function scanAll(cwd: string, config: ResourceConfig): Promise<ManagedReso
 
 function getDisplayFields(item: ManagedResource): { name: string; status: string; scope: string; kind: string } {
 	return {
-		name: item.scope === "package" ? `${item.name} (${basename(item.path)})` : item.name,
+		name: item.name,
 		status: item.status === "enabled" ? "ON" : "OFF",
 		scope: item.scope,
 		kind: item.kind === "file" ? "file" : "dir",
@@ -400,11 +419,11 @@ async function setSkillEnabled(item: ManagedResource, enabled: boolean): Promise
 }
 
 function isProtectedExtension(item: ManagedResource): boolean {
-	return item.scope === "global" && ["resource-manager", "extensions", "skills"].includes(item.name);
+	return item.scope !== "project" && ["resource-manager", "extensions", "skills"].includes(item.name);
 }
 
 function isHiddenExtension(item: ManagedResource): boolean {
-	return item.scope === "global" && item.name === "resource-manager";
+	return item.scope !== "project" && item.name === "resource-manager";
 }
 
 async function setAllEnabled(items: ManagedResource[], config: ResourceConfig, enabled: boolean): Promise<number> {
@@ -437,10 +456,10 @@ async function runManager(ctx: ExtensionCommandContext, config: ResourceConfig):
 	}
 
 	while (true) {
-		const items = await scanAll(ctx.cwd, config);
+		const items = await scanAll(ctx.cwd, ctx.isProjectTrusted(), config);
 
 		if (items.length === 0) {
-			ctx.ui.notify(`No custom global or project ${config.plural} found`, "info");
+			ctx.ui.notify(`No custom global, project, or package ${config.plural} found`, "info");
 			return;
 		}
 
@@ -450,7 +469,7 @@ async function runManager(ctx: ExtensionCommandContext, config: ResourceConfig):
 		if ("mode" in item) {
 			const enabled = item.action === "enableAll";
 			const verb = enabled ? "Enable" : "Disable";
-			const ok = await ctx.ui.confirm(`${verb} all ${config.plural}`, `${verb} all custom global and project ${config.plural}?`);
+			const ok = await ctx.ui.confirm(`${verb} all ${config.plural}`, `${verb} all custom global, project, and package ${config.plural}?`);
 			if (!ok) continue;
 
 			try {
@@ -511,7 +530,7 @@ const configs: ResourceConfig[] = [
 		type: "extension",
 		plural: "extensions",
 		command: "extensions",
-		description: "Manage custom global and project extensions",
+		description: "Manage custom global, project, and package extensions",
 		globalDir: getGlobalExtensionsDir,
 		projectDir: getProjectExtensionsDir,
 		scan: scanExtensions,
@@ -523,7 +542,7 @@ const configs: ResourceConfig[] = [
 		type: "skill",
 		plural: "skills",
 		command: "skills",
-		description: "Manage custom global and project skills",
+		description: "Manage custom global, project, and package skills",
 		globalDir: getGlobalSkillsDir,
 		projectDir: getProjectSkillsDir,
 		scan: scanSkills,
@@ -540,7 +559,7 @@ export default function resourceManager(pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("resources", {
-		description: "Manage custom global and project extensions or skills",
+		description: "Manage custom global, project, and package extensions or skills",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") {
 				if (ctx.hasUI) ctx.ui.notify("Resource manager requires TUI mode", "warning");
