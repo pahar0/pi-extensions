@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.82.0
+// Last verified working with Pi v0.82.1
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
