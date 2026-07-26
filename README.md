@@ -10,20 +10,16 @@ Install globally with Pi's package manager:
 pi install git:github.com/pahar0/pi-extensions
 ```
 
-Pi loads the extensions and skills declared by the package manifest. If Pi is already running, use `/reload` or restart Pi after installing.
+Pi loads the extensions declared by the package manifest. If Pi is already running, use `/reload` or restart Pi after installing.
 
 ## Extensions
 
-| Extension | Description |
-| --- | --- |
-| `init` | Adds `/init` to survey a repository and create or improve project guidance in `AGENTS.md`. |
-| `mutation-guard` | Prompts for approval before file edits, writes, and risky shell mutations. |
-| `resource-manager` | Adds commands for enabling, disabling, and uninstalling custom extensions and skills. |
-| `restore-files` | Tracks file checkpoints and can restore code alongside conversation tree navigation. |
-| `status-footer` | Replaces the footer with cwd, usage, context, model, thinking, and extension status info. |
-
-## Skills
-
-| Skill | Description |
-| --- | --- |
-| `brave-search` | Searches the web with Brave Search and extracts readable page content. |
+| Extension          | Description                                                                                             |
+| ------------------ | ------------------------------------------------------------------------------------------------------- |
+| `ask-user`         | Adds an `ask_user` wizard for 1–10 multiple-choice questions with an always-available free-form answer. |
+| `init`             | Adds `/init` to survey a repository and create or improve project guidance in `AGENTS.md`.              |
+| `mutation-guard`   | Prompts for approval before file edits, writes, and risky shell mutations.                              |
+| `resource-manager` | Adds commands for enabling, disabling, and uninstalling custom extensions and skills.                   |
+| `restore-files`    | Tracks file checkpoints and can restore code alongside conversation tree navigation.                    |
+| `status-footer`    | Replaces the footer with cwd, usage, context, model, thinking, and extension status info.               |
+| `codex-web-search` | Adds `web_search`, `web_fetch`, and `web_find` backed directly by Codex web search.                    |
