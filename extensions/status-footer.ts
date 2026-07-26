@@ -210,7 +210,6 @@ export default function statusFooter(pi: ExtensionAPI) {
 		const parts: string[] = [];
 		if (totalInput) parts.push(`↑${formatTokens(totalInput)}`);
 		if (totalOutput) parts.push(`↓${formatTokens(totalOutput)}`);
-		if (totalCacheRead) parts.push(`R${formatTokens(totalCacheRead)}`);
 		if (totalCacheWrite) parts.push(`W${formatTokens(totalCacheWrite)}`);
 
 		const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
