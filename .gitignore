@@ -1,3 +1,7 @@
 node_modules/
 *.log
 .DS_Store
+
+# Files renamed by resource-manager.ts when disabled
+extensions/**/*.ts.disabled
+skills/**/*.md.disabled
