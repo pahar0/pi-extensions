@@ -1,13 +1,10 @@
 // Last verified working with Pi v0.82.1
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 
-type ModelLike = {
-	id?: string;
-	name?: string;
-	contextWindow?: number;
-};
+type ModelLike = Model<Api>;
 
 type UsageLike = {
 	input: number;
@@ -24,16 +21,12 @@ type SessionEntryLike = {
 };
 
 type FooterThemeLike = {
-	fg: (token: string, text: string) => string;
+	fg: (token: ThemeColor, text: string) => string;
 };
 
 type FooterDataLike = {
 	onBranchChange: (listener: () => void) => () => void;
-	getExtensionStatuses: () => Map<string, string>;
-};
-
-type FooterTuiLike = {
-	requestRender: () => void;
+	getExtensionStatuses: () => ReadonlyMap<string, string>;
 };
 
 type FooterContextLike = {
@@ -49,21 +42,6 @@ type FooterContextLike = {
 		getSessionName?: () => string | undefined;
 	};
 	getContextUsage: () => { contextWindow?: number; percent: number | null } | null | undefined;
-	ui: {
-		setFooter: (
-			renderer:
-				| undefined
-				| ((
-						tui: FooterTuiLike,
-						theme: FooterThemeLike,
-						footerData: FooterDataLike,
-					) => {
-						dispose?: () => void;
-						render: (width: number) => string[];
-						invalidate: () => void;
-					}),
-		) => void;
-	};
 };
 
 export default function statusFooter(pi: ExtensionAPI) {
@@ -231,9 +209,9 @@ export default function statusFooter(pi: ExtensionAPI) {
 		return parts.map((part) => (part.includes("\x1b[") ? part : theme.fg("dim", part))).join(" ");
 	}
 
-	function installFooter(ctx: FooterContextLike) {
-		if (ctx?.mode !== "tui") return;
-		ctx.ui.setFooter((tui: FooterTuiLike, theme: FooterThemeLike, footerData: FooterDataLike) => {
+	function installFooter(ctx: ExtensionContext) {
+		if (ctx.mode !== "tui") return;
+		ctx.ui.setFooter((tui, theme, footerData) => {
 			const dispose = footerData.onBranchChange(() => tui.requestRender());
 			return {
 				dispose,

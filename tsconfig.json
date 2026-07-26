@@ -10,5 +10,5 @@
     "types": ["node"],
     "verbatimModuleSyntax": true
   },
-  "include": ["extensions/ask-user.ts", "extensions/codex-web-search.ts"]
+  "include": ["extensions/**/*.ts"]
 }

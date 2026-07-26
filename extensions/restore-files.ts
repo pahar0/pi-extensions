@@ -2,7 +2,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, type Dirent } from "node:fs";
 import { chmod, copyFile, mkdir, readdir, realpath, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -133,7 +133,7 @@ function textFromUserContent(content: unknown): string {
 }
 
 function isSelectableUserMessageEntry(entry: SessionEntryLike | undefined): entry is SessionMessageEntryLike {
-  if (!entry || entry.type !== "message") return false;
+  if (!entry || entry.type !== "message" || !("message" in entry)) return false;
   if (entry.message?.role !== "user") return false;
   const text = textFromUserContent(entry.message.content).trim();
   if (text.startsWith("/")) return false;
@@ -437,9 +437,9 @@ export default function (pi: ExtensionAPI) {
 
     const keepRefs = getReferencedBackupRefs();
 
-    let entries: Awaited<ReturnType<typeof readdir>>;
+    let entries: Dirent<string>[];
     try {
-      entries = await readdir(root, { withFileTypes: true });
+      entries = await readdir(root, { withFileTypes: true, encoding: "utf8" });
     } catch {
       return;
     }
