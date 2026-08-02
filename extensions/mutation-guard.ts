@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.82.1
+// Last verified working with Pi v0.83.0
 import { completeSimple, type Usage } from "@earendil-works/pi-ai/compat";
 import {
 	type ExtensionAPI,

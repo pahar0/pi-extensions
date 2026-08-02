@@ -1,6 +1,6 @@
-// Last verified working with Pi v0.82.1
+// Last verified working with Pi v0.83.0
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
 import { createReadStream, type Dirent } from "node:fs";
 import { chmod, copyFile, mkdir, readdir, realpath, stat, unlink } from "node:fs/promises";
@@ -162,13 +162,6 @@ function formatDisplayPath(cwd: string, fileKey: string): string {
     return `~/${relative(home, absolute)}`;
   }
   return absolute;
-}
-
-function truncatePlain(text: string, width: number): string {
-  if (width <= 0) return "";
-  if (text.length <= width) return text;
-  if (width <= 1) return "…";
-  return `${text.slice(0, width - 1)}…`;
 }
 
 type RestoreAction = "both" | "conversation" | "code" | "cancel";
@@ -867,12 +860,18 @@ export default function (pi: ExtensionAPI) {
           const previewWidth = Math.max(...actionableRows.map((row) => row.preview.length));
           const countWidth = Math.max(...actionableRows.map((row) => row.countLabel.length));
 
-          const actionable: Array<{ entry: SessionMessageEntryLike; label: string; files: string[] }> =
-            actionableRows.map((row) => ({
-              entry: row.entry,
-              label: `${row.timeLabel.padEnd(timeWidth)}  ${row.preview.padEnd(previewWidth)}  ${row.countLabel.padEnd(countWidth)}  ${row.shortEntryId}`,
-              files: row.files,
-            }));
+          const actionable: Array<{
+            entry: SessionMessageEntryLike;
+            label: string;
+            files: string[];
+            timeLabel: string;
+            preview: string;
+            countLabel: string;
+            shortEntryId: string;
+          }> = actionableRows.map((row) => ({
+            ...row,
+            label: `${row.timeLabel.padEnd(timeWidth)}  ${row.preview.padEnd(previewWidth)}  ${row.countLabel.padEnd(countWidth)}  ${row.shortEntryId}`,
+          }));
 
           if (commandCtx.mode === "tui" && typeof commandCtx.ui.custom === "function") {
             const pickedIndex = await commandCtx.ui.custom<number>(
@@ -921,40 +920,53 @@ export default function (pi: ExtensionAPI) {
                   },
                   render(width: number): string[] {
                     const outerWidth = Math.max(1, width);
-                    const innerWidth = Math.max(1, outerWidth - 4);
+                    const innerWidth = Math.max(1, outerWidth - 2);
+                    const terminalRows = tui.terminal?.rows ?? 24;
+                    const visibleEntryLines = Math.max(4, terminalRows - 7);
+                    const idWidth = Math.max(8, ...actionable.map((item) => item.shortEntryId.length));
+                    const fixedColumnsWidth = 3 + 2 + timeWidth + 2 + 2 + countWidth + 2 + idWidth;
+                    const effectivePreviewWidth = Math.max(1, innerWidth - fixedColumnsWidth);
 
-                    const padPlain = (text: string, w: number): string => {
-                      const t = truncatePlain(text, w);
-                      return t + " ".repeat(Math.max(0, w - t.length));
+                    const padPlain = (text: string, targetWidth: number): string => {
+                      const truncated = truncateToWidth(text, Math.max(0, targetWidth), "");
+                      return truncated + " ".repeat(Math.max(0, targetWidth - visibleWidth(truncated)));
+                    };
+                    const fit = (text: string, targetWidth: number): string => {
+                      const truncated = truncateToWidth(text, Math.max(0, targetWidth), "");
+                      return truncated + " ".repeat(Math.max(0, targetWidth - visibleWidth(truncated)));
+                    };
+                    const split = (left: string, right: string, targetWidth: number): string => {
+                      const rightWidth = visibleWidth(right);
+                      const fittedLeft = truncateToWidth(left, Math.max(0, targetWidth - rightWidth - 1), "…");
+                      const gap = Math.max(1, targetWidth - visibleWidth(fittedLeft) - rightWidth);
+                      return truncateToWidth(`${fittedLeft}${" ".repeat(gap)}${right}`, targetWidth, "");
+                    };
+                    const borderSegment = (targetWidth: number, title: string): string => {
+                      const label = targetWidth >= 4
+                        ? ` ${truncateToWidth(title, Math.max(0, targetWidth - 3), "…")} `
+                        : "";
+                      const labelWidth = visibleWidth(label);
+                      return theme.fg("borderMuted", "─") +
+                        (label ? theme.fg("text", label) : "") +
+                        theme.fg("borderMuted", "─".repeat(Math.max(0, targetWidth - labelWidth - 1)));
                     };
 
-                    const hintLines: Array<{ text: string; kind: "hint" | "normal" }> = [
-                      {
-                        text: "↑↓ select • → expand files • ← collapse • Enter confirm • Esc cancel",
-                        kind: "hint",
-                      },
-                      { text: "", kind: "normal" },
-                    ];
-                    const entryLines: Array<{ text: string; kind: "normal" | "selected" | "file" }> = [];
+                    type DashboardLine =
+                      | { kind: "checkpoint"; itemIndex: number }
+                      | { kind: "file"; itemIndex: number; file: string };
+                    const entryLines: DashboardLine[] = [];
                     let selectedLineIndex = 0;
 
-                    for (let i = 0; i < actionable.length; i++) {
-                      const isSelected = i === selectedIndex;
-                      if (isSelected) selectedLineIndex = entryLines.length;
-                      const rowText = `${isSelected ? "▶" : " "} ${actionable[i].label}`;
-                      entryLines.push({ text: rowText, kind: isSelected ? "selected" : "normal" });
-
-                      if (expandedIndex === i) {
-                        for (const file of actionable[i].files) {
-                          entryLines.push({ text: `    - ${file}`, kind: "file" });
+                    for (let index = 0; index < actionable.length; index++) {
+                      if (index === selectedIndex) selectedLineIndex = entryLines.length;
+                      entryLines.push({ kind: "checkpoint", itemIndex: index });
+                      if (expandedIndex === index) {
+                        for (const file of actionable[index].files) {
+                          entryLines.push({ kind: "file", itemIndex: index, file });
                         }
                       }
                     }
 
-                    const fixedChromeLines = 4;
-                    const fixedBodyLines = hintLines.length;
-                    const maxOverlayHeight = Math.max(10, Math.floor((tui.terminal?.rows ?? 24) * 0.85));
-                    const visibleEntryLines = Math.max(4, maxOverlayHeight - fixedChromeLines - fixedBodyLines);
                     const maxOffset = Math.max(0, entryLines.length - visibleEntryLines);
                     const expandedLineCount =
                       expandedIndex === selectedIndex ? actionable[selectedIndex]?.files.length ?? 0 : 0;
@@ -967,49 +979,98 @@ export default function (pi: ExtensionAPI) {
                       if (visibleRangeEnd >= scrollOffset + visibleEntryLines) {
                         scrollOffset = visibleRangeEnd - visibleEntryLines + 1;
                       }
-                    } else {
-                      if (
-                        visibleRangeStart < scrollOffset ||
-                        visibleRangeStart >= scrollOffset + visibleEntryLines
-                      ) {
-                        scrollOffset = visibleRangeStart;
-                      }
+                    } else if (
+                      visibleRangeStart < scrollOffset ||
+                      visibleRangeStart >= scrollOffset + visibleEntryLines
+                    ) {
+                      scrollOffset = visibleRangeStart;
                     }
                     clampScrollOffset(maxOffset);
 
                     const viewport = entryLines.slice(scrollOffset, scrollOffset + visibleEntryLines);
-                    const scrollInfo =
-                      entryLines.length > visibleEntryLines
-                        ? ` lines ${scrollOffset + 1}-${Math.min(entryLines.length, scrollOffset + visibleEntryLines)} / ${entryLines.length}`
-                        : "";
-
-                    const lines: string[] = [];
-                    lines.push(theme.fg("accent", `┌${"─".repeat(Math.max(0, outerWidth - 2))}┐`));
-                    const titleText = padPlain(`Restore files to checkpoint before:${scrollInfo}`, innerWidth);
-                    lines.push(
-                      theme.fg("accent", "│ ") +
-                        theme.bold(titleText) +
-                        theme.fg("accent", " │"),
+                    const scrollInfo = entryLines.length > visibleEntryLines
+                      ? ` · ${scrollOffset + 1}-${Math.min(entryLines.length, scrollOffset + visibleEntryLines)}/${entryLines.length}`
+                      : "";
+                    const uniqueFiles = new Set(actionable.flatMap((item) => item.files)).size;
+                    const headerLeft = ` ${theme.bold(theme.fg("accent", "Restore files"))}`;
+                    const headerRight = theme.fg(
+                      "dim",
+                      `${actionable.length} checkpoint${actionable.length === 1 ? "" : "s"} · ${uniqueFiles} file${uniqueFiles === 1 ? "" : "s"} `,
                     );
-                    lines.push(theme.fg("accent", `├${"─".repeat(Math.max(0, outerWidth - 2))}┤`));
+                    const columnHeader =
+                      `     ${padPlain("time", timeWidth)}  ` +
+                      `${padPlain("checkpoint", effectivePreviewWidth)}  ` +
+                      `${padPlain("files", countWidth)}  ` +
+                      padPlain("id", idWidth);
+                    const panelBorder = theme.fg("borderMuted", "│");
+                    const lines: string[] = [split(headerLeft, headerRight, outerWidth)];
 
-                    for (const line of [...hintLines, ...viewport]) {
-                      const padded = padPlain(line.text, innerWidth);
-                      const styled =
-                        line.kind === "selected"
-                          ? theme.fg("accent", theme.bold(padded))
-                          : line.kind === "hint" || line.kind === "file"
-                            ? theme.fg("dim", padded)
-                            : padded;
-                      lines.push(theme.fg("accent", "│ ") + styled + theme.fg("accent", " │"));
+                    lines.push(
+                      theme.fg("borderMuted", "╭") +
+                        borderSegment(innerWidth, `Rewindable checkpoints${scrollInfo}`) +
+                        theme.fg("borderMuted", "╮"),
+                    );
+                    lines.push(panelBorder + theme.fg("dim", fit(columnHeader, innerWidth)) + panelBorder);
+                    lines.push(
+                      theme.fg("borderMuted", "├") +
+                        theme.fg("borderMuted", "─".repeat(innerWidth)) +
+                        theme.fg("borderMuted", "┤"),
+                    );
+
+                    for (let index = 0; index < visibleEntryLines; index++) {
+                      const line = viewport[index];
+                      if (!line) {
+                        lines.push(panelBorder + " ".repeat(innerWidth) + panelBorder);
+                        continue;
+                      }
+
+                      if (line.kind === "file") {
+                        const filePrefix = theme.fg("borderMuted", "     └ ");
+                        const file = theme.fg(
+                          line.itemIndex === selectedIndex ? "muted" : "dim",
+                          truncateToWidth(line.file, Math.max(1, innerWidth - 7), "…"),
+                        );
+                        lines.push(panelBorder + fit(`${filePrefix}${file}`, innerWidth) + panelBorder);
+                        continue;
+                      }
+
+                      const item = actionable[line.itemIndex];
+                      const selected = line.itemIndex === selectedIndex;
+                      const marker = selected ? theme.fg("accent", " ❯ ") : "   ";
+                      const expander = expandedIndex === line.itemIndex
+                        ? theme.fg(selected ? "accent" : "muted", "▾ ")
+                        : theme.fg(selected ? "accent" : "dim", "› ");
+                      const time = theme.fg("muted", padPlain(item.timeLabel, timeWidth));
+                      const preview = theme.fg(
+                        selected ? "accent" : "text",
+                        padPlain(item.preview, effectivePreviewWidth),
+                      );
+                      const count = theme.fg(
+                        selected ? "accent" : "muted",
+                        padPlain(item.countLabel, countWidth),
+                      );
+                      const id = theme.fg("dim", padPlain(item.shortEntryId, idWidth));
+                      const content = `${marker}${expander}${time}  ${preview}  ${count}  ${id}`;
+                      lines.push(panelBorder + fit(content, innerWidth) + panelBorder);
                     }
 
-                    lines.push(theme.fg("accent", `└${"─".repeat(Math.max(0, outerWidth - 2))}┘`));
-                    return lines.map((line) => truncateToWidth(line, width));
+                    lines.push(
+                      theme.fg("borderMuted", "╰") +
+                        theme.fg("borderMuted", "─".repeat(innerWidth)) +
+                        theme.fg("borderMuted", "╯"),
+                    );
+                    lines.push(
+                      truncateToWidth(
+                        theme.fg("dim", " ↑↓ select · → expand files · ← collapse · enter confirm · esc close"),
+                        outerWidth,
+                        "",
+                      ),
+                    );
+                    return lines.map((line) => truncateToWidth(line, outerWidth, ""));
                   },
                 };
               },
-              { overlay: true, overlayOptions: { anchor: "center", width: "95%", maxHeight: "85%", margin: 1 } },
+              { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%" } },
             );
 
             if (pickedIndex === undefined) return;

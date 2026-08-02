@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.82.1
+// Last verified working with Pi v0.83.0
 // Generic resource manager for Pi extensions and skills.
 import { existsSync } from "node:fs";
 import { readdir, rename, rm } from "node:fs/promises";
@@ -11,7 +11,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type Scope = "global" | "project" | "package";
 type Kind = "file" | "directory";
@@ -289,29 +289,45 @@ async function selectManagedResource(
 			} while (!isSelectable(next) && next !== selectedIndex && next > 0 && next < rows.length - 1);
 			if (isSelectable(next)) selectedIndex = next;
 		};
-
 		const clampScrollOffset = (maxOffset: number) => {
 			scrollOffset = Math.max(0, Math.min(scrollOffset, Math.max(0, maxOffset)));
 		};
+		const enabledCount = items.filter((item) => item.status === "enabled").length;
+		const disabledCount = items.length - enabledCount;
 
 		return {
 			render(width: number): string[] {
 				const outerWidth = Math.max(1, width);
-				const innerWidth = Math.max(1, outerWidth - 4);
-				const hint = "↑↓ navigate • enter select • esc cancel";
-				const fixedChromeLines = 4;
-				const fixedBodyLines = 2;
-				const maxOverlayHeight = Math.max(10, Math.floor((tui.terminal?.rows ?? 24) * 0.85));
-				const visibleRowCount = Math.max(4, maxOverlayHeight - fixedChromeLines - fixedBodyLines);
+				const innerWidth = Math.max(1, outerWidth - 2);
+				const terminalRows = tui.terminal?.rows ?? 24;
+				const visibleRowCount = Math.max(4, terminalRows - 7);
 				const maxOffset = Math.max(0, rows.length - visibleRowCount);
-				const minNameWidth = 8;
-				const nonNameWidth = 2 + 2 + statusWidth + 2 + scopeWidth + 2 + kindWidth;
-				const effectiveNameWidth = Math.max(minNameWidth, innerWidth - nonNameWidth);
-				const padPlain = (text: string, w: number): string => {
-					const t = truncateToWidth(text, w, "");
-					return t + " ".repeat(Math.max(0, w - t.length));
+				const fixedColumnsWidth = 3 + 2 + 2 + statusWidth + 2 + scopeWidth + 2 + kindWidth;
+				const effectiveNameWidth = Math.max(1, innerWidth - fixedColumnsWidth);
+
+				const padPlain = (text: string, targetWidth: number): string => {
+					const truncated = truncateToWidth(text, Math.max(0, targetWidth), "");
+					return truncated + " ".repeat(Math.max(0, targetWidth - visibleWidth(truncated)));
 				};
-				const header = `  ${padPlain(nameHeader, effectiveNameWidth)}  ${padPlain(statusHeader, statusWidth)}  ${padPlain(scopeHeader, scopeWidth)}  ${padPlain(kindHeader, kindWidth)}`;
+				const fit = (text: string, targetWidth: number): string => {
+					const truncated = truncateToWidth(text, Math.max(0, targetWidth), "");
+					return truncated + " ".repeat(Math.max(0, targetWidth - visibleWidth(truncated)));
+				};
+				const split = (left: string, right: string, targetWidth: number): string => {
+					const rightWidth = visibleWidth(right);
+					const fittedLeft = truncateToWidth(left, Math.max(0, targetWidth - rightWidth - 1), "…");
+					const gap = Math.max(1, targetWidth - visibleWidth(fittedLeft) - rightWidth);
+					return truncateToWidth(`${fittedLeft}${" ".repeat(gap)}${right}`, targetWidth, "");
+				};
+				const borderSegment = (targetWidth: number, title: string): string => {
+					const label = targetWidth >= 4
+						? ` ${truncateToWidth(title, Math.max(0, targetWidth - 3), "…")} `
+						: "";
+					const labelWidth = visibleWidth(label);
+					return theme.fg("borderMuted", "─") +
+						(label ? theme.fg("text", label) : "") +
+						theme.fg("borderMuted", "─".repeat(Math.max(0, targetWidth - labelWidth - 1)));
+				};
 
 				if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
 				if (selectedIndex >= scrollOffset + visibleRowCount) scrollOffset = selectedIndex - visibleRowCount + 1;
@@ -319,50 +335,85 @@ async function selectManagedResource(
 
 				const viewport = rows.slice(scrollOffset, scrollOffset + visibleRowCount);
 				const scrollInfo = rows.length > visibleRowCount
-					? ` rows ${scrollOffset + 1}-${Math.min(rows.length, scrollOffset + visibleRowCount)} / ${rows.length}`
+					? ` · ${scrollOffset + 1}-${Math.min(rows.length, scrollOffset + visibleRowCount)}/${rows.length}`
 					: "";
+				const headerLeft = ` ${theme.bold(theme.fg("accent", capitalize(config.plural)))}`;
+				const headerRight = theme.fg(
+					"dim",
+					`${items.length} total · ${enabledCount} on · ${disabledCount} off `,
+				);
+				const columnHeader =
+					`     ${padPlain(nameHeader, effectiveNameWidth)}  ` +
+					`${padPlain(statusHeader, statusWidth)}  ` +
+					`${padPlain(scopeHeader, scopeWidth)}  ` +
+					padPlain(kindHeader, kindWidth);
+				const panelBorder = theme.fg("borderMuted", "│");
+				const lines: string[] = [split(headerLeft, headerRight, outerWidth)];
 
-				const lines: string[] = [];
-				lines.push(theme.fg("accent", `┌${"─".repeat(Math.max(0, outerWidth - 2))}┐`));
-				lines.push(theme.fg("accent", "│ ") + theme.bold(padPlain(`${capitalize(config.plural)}${scrollInfo}`, innerWidth)) + theme.fg("accent", " │"));
-				lines.push(theme.fg("accent", `├${"─".repeat(Math.max(0, outerWidth - 2))}┤`));
-				lines.push(theme.fg("accent", "│ ") + theme.fg("dim", padPlain(header, innerWidth)) + theme.fg("accent", " │"));
+				lines.push(
+					theme.fg("borderMuted", "╭") +
+						borderSegment(innerWidth, `${capitalize(config.type)} resources${scrollInfo}`) +
+						theme.fg("borderMuted", "╮"),
+				);
+				lines.push(panelBorder + theme.fg("dim", fit(columnHeader, innerWidth)) + panelBorder);
+				lines.push(
+					theme.fg("borderMuted", "├") +
+						theme.fg("borderMuted", "─".repeat(innerWidth)) +
+						theme.fg("borderMuted", "┤"),
+				);
 
-				for (let i = 0; i < viewport.length; i++) {
-					const rowIndex = scrollOffset + i;
-					const row = viewport[i]!;
+				for (let index = 0; index < visibleRowCount; index++) {
+					const rowIndex = scrollOffset + index;
+					const row = viewport[index];
+					if (!row) {
+						lines.push(panelBorder + " ".repeat(innerWidth) + panelBorder);
+						continue;
+					}
 					if (row.rowType === "separator") {
-						lines.push(theme.fg("accent", "│ ") + theme.fg("dim", padPlain("  " + "─".repeat(Math.max(0, innerWidth - 2)), innerWidth)) + theme.fg("accent", " │"));
+						lines.push(
+							panelBorder +
+								theme.fg("borderMuted", fit(`  ${"─".repeat(Math.max(0, innerWidth - 2))}`, innerWidth)) +
+								panelBorder,
+						);
 						continue;
 					}
 
-					const isSelected = rowIndex === selectedIndex;
-					const prefixPlain = isSelected ? "> " : "  ";
-					const prefix = isSelected ? theme.fg("accent", prefixPlain) : prefixPlain;
+					const selected = rowIndex === selectedIndex;
+					const marker = selected ? theme.fg("accent", " ❯ ") : "   ";
+					const glyph = row.rowType === "action"
+						? theme.fg(row.disabled ? "dim" : "accent", "◆ ")
+						: theme.fg(row.status === "ON" ? "success" : "dim", "■ ");
 					const namePlain = padPlain(row.name, effectiveNameWidth);
 					const name = row.rowType === "action" && row.disabled
 						? theme.fg("dim", namePlain)
 						: row.rowType === "item" && row.status === "OFF"
 							? theme.fg("dim", namePlain)
-							: isSelected ? theme.fg("accent", theme.bold(namePlain)) : namePlain;
+							: selected
+								? theme.fg("accent", namePlain)
+								: theme.fg("text", namePlain);
 					const statusPlain = padPlain(row.status, statusWidth);
 					const status = row.rowType === "action"
 						? theme.fg(row.disabled ? "dim" : "muted", statusPlain)
-						: row.status === "ON"
-							? theme.fg("success", statusPlain)
-							: theme.fg("dim", statusPlain);
-					const scopePlain = padPlain(row.scope, scopeWidth);
-					const scope = theme.fg(isSelected ? "accent" : "muted", scopePlain);
-					const kindPlain = padPlain(row.kind, kindWidth);
-					const kind = theme.fg(isSelected ? "accent" : "dim", kindPlain);
-					const plainWidth = prefixPlain.length + effectiveNameWidth + 2 + statusWidth + 2 + scopeWidth + 2 + kindWidth;
-					const trailingSpaces = " ".repeat(Math.max(0, innerWidth - plainWidth));
-					lines.push(theme.fg("accent", "│ ") + `${prefix}${name}  ${status}  ${scope}  ${kind}${trailingSpaces}` + theme.fg("accent", " │"));
+						: theme.fg(row.status === "ON" ? "success" : "dim", statusPlain);
+					const scope = theme.fg(selected ? "accent" : "muted", padPlain(row.scope, scopeWidth));
+					const kind = theme.fg(selected ? "accent" : "dim", padPlain(row.kind, kindWidth));
+					const content = `${marker}${glyph}${name}  ${status}  ${scope}  ${kind}`;
+					lines.push(panelBorder + fit(content, innerWidth) + panelBorder);
 				}
 
-				lines.push(theme.fg("accent", "│ ") + theme.fg("dim", padPlain(hint, innerWidth)) + theme.fg("accent", " │"));
-				lines.push(theme.fg("accent", `└${"─".repeat(Math.max(0, outerWidth - 2))}┘`));
-				return lines.map((line) => truncateToWidth(line, width));
+				lines.push(
+					theme.fg("borderMuted", "╰") +
+						theme.fg("borderMuted", "─".repeat(innerWidth)) +
+						theme.fg("borderMuted", "╯"),
+				);
+				lines.push(
+					truncateToWidth(
+						theme.fg("dim", " ↑↓ navigate · enter select · esc close"),
+						outerWidth,
+						"",
+					),
+				);
+				return lines.map((line) => truncateToWidth(line, outerWidth, ""));
 			},
 			invalidate() {},
 			handleInput(data: string) {
@@ -385,7 +436,7 @@ async function selectManagedResource(
 				if (keybindings.matches(data, "tui.select.cancel")) done(null);
 			},
 		};
-	}, { overlay: true, overlayOptions: { anchor: "center", width: "95%", maxHeight: "85%", margin: 1 } });
+	}, { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%" } });
 }
 
 function capitalize(text: string): string {

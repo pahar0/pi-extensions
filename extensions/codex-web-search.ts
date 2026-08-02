@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.82.1
+// Last verified working with Pi v0.83.0
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
