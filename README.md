@@ -17,6 +17,7 @@ Pi loads the extensions declared by the package manifest. If Pi is already runni
 | Extension          | Description                                                                                             |
 | ------------------ | ------------------------------------------------------------------------------------------------------- |
 | `ask-user`         | Adds an `ask_user` wizard for 1–10 multiple-choice questions with an always-available free-form answer. |
+| `autocomplete`     | Adds manual inline suggestions with `Alt+A`, an animated cursor, and `Tab`/`Escape` controls.           |
 | `init`             | Adds `/init` to survey a repository and create or improve project guidance in `AGENTS.md`.              |
 | `mutation-guard`   | Prompts for approval before file edits, writes, and risky shell mutations.                              |
 | `resource-manager` | Adds commands for enabling, disabling, and uninstalling custom extensions and skills.                   |

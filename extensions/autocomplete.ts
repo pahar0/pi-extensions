@@ -3,7 +3,7 @@
  * Autocomplete — manual inline completion for Pi's input editor.
  *
  * Alt+A asks the configured completion model to continue the exact current
- * input. An animated cursor is shown while waiting, then the result appears as dimmed
+ * non-empty input. An animated cursor is shown while waiting, then the result appears as dimmed
  * inline text. Tab accepts it, Escape dismisses it, and editing cancels it.
  * Nothing is submitted automatically.
  */
@@ -56,6 +56,7 @@ interface AutocompleteEditorOptions {
 	styleSuggestion: (text: string) => string;
 	styleLoading: (text: string) => string;
 	onEmpty: () => void;
+	onEmptyDraft: () => void;
 	onError: (error: unknown) => void;
 	onCursorNotAtEnd: () => void;
 }
@@ -246,14 +247,19 @@ class AutocompleteEditor extends CustomEditor {
 
 	requestInlineSuggestion(): void {
 		if (this.disposed) return;
+
+		const editorText = this.getText();
+		this.cancelAutocompleteWork();
+		if (!editorText.trim()) {
+			this.options.onEmptyDraft();
+			return;
+		}
 		if (!this.isCursorAtEnd()) {
 			this.options.onCursorNotAtEnd();
 			return;
 		}
 
-		const editorText = this.getText();
 		const draft = this.getExpandedText();
-		this.cancelAutocompleteWork();
 		const controller = new AbortController();
 		this.requestController = controller;
 		this.startLoadingAnimation();
@@ -414,6 +420,9 @@ export default function autocomplete(pi: ExtensionAPI) {
 				styleLoading: (text) => ctx.ui.theme.fg("accent", text),
 				onEmpty: () => {
 					if (sessionActive) ctx.ui.notify("The autocomplete model returned no suggestion", "warning");
+				},
+				onEmptyDraft: () => {
+					if (sessionActive) ctx.ui.notify("Type something before requesting autocomplete", "warning");
 				},
 				onError: (error) => {
 					if (!sessionActive) return;
