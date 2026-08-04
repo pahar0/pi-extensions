@@ -25,8 +25,6 @@ import {
 } from "@earendil-works/pi-tui";
 
 const AUTOCOMPLETE_SHORTCUT = "alt+a";
-const AUTOCOMPLETE_PROVIDER_ID = "openai-codex";
-const AUTOCOMPLETE_MODEL_ID = "gpt-5.6-luna";
 const MAX_SUGGESTION_CHARS = 240;
 const MAX_CONTEXT_MESSAGES = 8;
 const MAX_CONTEXT_CHARS = 4_000;
@@ -162,10 +160,8 @@ async function generateSuggestion(
 	ctx: ExtensionContext,
 	signal: AbortSignal,
 ): Promise<string> {
-	const model = ctx.modelRegistry.find(AUTOCOMPLETE_PROVIDER_ID, AUTOCOMPLETE_MODEL_ID);
-	if (!model) {
-		throw new Error(`Autocomplete model not found: ${AUTOCOMPLETE_PROVIDER_ID}/${AUTOCOMPLETE_MODEL_ID}`);
-	}
+	const model = ctx.model;
+	if (!model) throw new Error("No model is currently selected for autocomplete");
 
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (!auth.ok) throw new Error(auth.error);
