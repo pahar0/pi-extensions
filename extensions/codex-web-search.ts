@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.83.0
+// Last verified working with Pi v0.84.1
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -575,7 +575,10 @@ export default function codexWebSearchExtension(pi: ExtensionAPI) {
 
 		const accountId = extractAccountId(auth.apiKey);
 		const headers = new Headers(model.headers);
-		for (const [key, value] of Object.entries(auth.headers ?? {})) headers.set(key, value);
+		for (const [key, value] of Object.entries(auth.headers ?? {})) {
+			if (value === null) headers.delete(key);
+			else headers.set(key, value);
+		}
 		headers.set("authorization", `Bearer ${auth.apiKey}`);
 		headers.set("chatgpt-account-id", accountId);
 		headers.set("content-type", "application/json");

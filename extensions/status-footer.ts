@@ -1,5 +1,5 @@
-// Last verified working with Pi v0.83.0
-import type { Api, Model } from "@earendil-works/pi-ai";
+// Last verified working with Pi v0.84.1
+import type { Api, Model, Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
@@ -36,6 +36,7 @@ type FooterContextLike = {
 	model?: ModelLike;
 	modelRegistry: {
 		isUsingOAuth: (model: ModelLike) => boolean;
+		getProvider: (provider: string) => Provider | undefined;
 	};
 	sessionManager: {
 		getEntries: () => SessionEntryLike[];
@@ -190,7 +191,11 @@ export default function statusFooter(pi: ExtensionAPI) {
 		if (totalOutput) parts.push(`↓${formatTokens(totalOutput)}`);
 		if (totalCacheWrite) parts.push(`W${formatTokens(totalCacheWrite)}`);
 
-		const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
+		const usingSubscription = ctx.model
+			? ctx.model.provider === "kimi-coding" ||
+				(ctx.modelRegistry.isUsingOAuth(ctx.model) &&
+					ctx.modelRegistry.getProvider(ctx.model.provider)?.auth.oauth?.isSubscription === true)
+			: false;
 		if (totalCost || usingSubscription) {
 			parts.push(`$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
 		}

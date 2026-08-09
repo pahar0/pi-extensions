@@ -24,9 +24,3 @@ Pi loads the extensions declared by the package manifest. If Pi is already runni
 | `restore-files`    | Tracks file checkpoints and can restore code alongside conversation tree navigation.                    |
 | `status-footer`    | Replaces the footer with cwd, usage, context, model, thinking, and extension status info.               |
 | `codex-web-search` | Adds `web_search`, `web_fetch`, and `web_find` backed directly by Codex web search.                    |
-
-## Skills
-
-| Skill           | Description                                                                                              |
-| --------------- | -------------------------------------------------------------------------------------------------------- |
-| `project-notes` | Reviews durable repository learnings and publishes approved guidance directly to project-level AGENTS.md. |
