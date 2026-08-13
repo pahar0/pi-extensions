@@ -3,7 +3,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 
 const SHORTCUT = Key.ctrl("r");
-const MARKER_TYPE = "retry-interrupted-turn";
+const MARKER_TYPE = "continue-agent-turn";
+const MARKER_TYPES = new Set([MARKER_TYPE, "retry-interrupted-turn"]);
 const INTERRUPTED_STOP_REASONS = new Set(["aborted", "error"]);
 
 type ContextMessage = {
@@ -31,12 +32,12 @@ function canContinueFrom(message: ContextMessage | undefined): boolean {
  * remains the continuation point. This mirrors Agent.continue() without exposing
  * the marker to the model.
  */
-function withoutRetryMarkers<T extends ContextMessage>(messages: T[]): T[] {
+function withoutContinuationMarkers<T extends ContextMessage>(messages: T[]): T[] {
 	const removed = new Set<number>();
 
 	for (let index = 0; index < messages.length; index += 1) {
 		const message = messages[index];
-		if (message?.role !== "custom" || message.customType !== MARKER_TYPE) continue;
+		if (message?.role !== "custom" || !message.customType || !MARKER_TYPES.has(message.customType)) continue;
 
 		removed.add(index);
 		let previous = index - 1;
@@ -49,9 +50,9 @@ function withoutRetryMarkers<T extends ContextMessage>(messages: T[]): T[] {
 	return removed.size === 0 ? messages : messages.filter((_message, index) => !removed.has(index));
 }
 
-export default function retryInterruptedTurnExtension(pi: ExtensionAPI) {
+export default function continueAgentTurnExtension(pi: ExtensionAPI) {
 	pi.on("context", (event) => {
-		const messages = withoutRetryMarkers(event.messages);
+		const messages = withoutContinuationMarkers(event.messages);
 		return messages === event.messages ? undefined : { messages };
 	});
 

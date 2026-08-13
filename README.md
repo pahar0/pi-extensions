@@ -23,5 +23,5 @@ Pi loads the extensions declared by the package manifest. If Pi is already runni
 | `mutation-guard`          | Prompts for approval before file edits, writes, and risky shell mutations.                              |
 | `resource-manager`        | Adds commands for enabling, disabling, and uninstalling custom extensions and skills.                   |
 | `restore-files`           | Tracks file checkpoints and can restore code alongside conversation tree navigation.                   |
-| `retry-interrupted-turn`  | Continues from a user/tool result or retries an interrupted turn with `Ctrl+R`, without a user message. |
+| `continue-agent-turn`     | Continues the current agent turn with `Ctrl+R`, retrying interrupted attempts when necessary.          |
 | `status-footer`           | Replaces the footer with cwd, usage, context, model, thinking, and extension status info.               |
