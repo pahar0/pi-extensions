@@ -20,11 +20,16 @@ function isInterruptedAssistant(message: ContextMessage | undefined): boolean {
 	);
 }
 
+function canContinueFrom(message: ContextMessage | undefined): boolean {
+	return message?.role === "user" || message?.role === "toolResult" || isInterruptedAssistant(message);
+}
+
 /**
  * A custom message is required to start an idle extension turn. Remove that
- * private control marker, plus the failed assistant attempt(s) it retries,
- * before every provider request. The model therefore receives the same clean
- * context that it would have received if Pi exposed Agent.continue() here.
+ * private control marker before every provider request. When it follows failed
+ * assistant attempts, remove those too; otherwise the existing user/tool result
+ * remains the continuation point. This mirrors Agent.continue() without exposing
+ * the marker to the model.
  */
 function withoutRetryMarkers<T extends ContextMessage>(messages: T[]): T[] {
 	const removed = new Set<number>();
@@ -51,7 +56,7 @@ export default function retryInterruptedTurnExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerShortcut(SHORTCUT, {
-		description: "Retry the last interrupted agent turn without adding a user message",
+		description: "Continue the current agent turn or retry it if interrupted",
 		handler: async (ctx) => {
 			if (!ctx.isIdle()) {
 				ctx.ui.notify("The agent is still running", "warning");
@@ -67,15 +72,15 @@ export default function retryInterruptedTurnExtension(pi: ExtensionAPI) {
 				lastMessageEntry?.type === "message"
 					? (lastMessageEntry.message as ContextMessage)
 					: undefined;
-			if (!isInterruptedAssistant(lastMessage)) {
-				ctx.ui.notify("There is no interrupted agent turn to retry", "warning");
+			if (!canContinueFrom(lastMessage)) {
+				ctx.ui.notify("There is no agent turn to continue", "warning");
 				return;
 			}
 
 			pi.sendMessage(
 				{
 					customType: MARKER_TYPE,
-					content: "Retry the interrupted agent turn.",
+					content: "Continue the current agent turn.",
 					display: false,
 				},
 				{ triggerTurn: true },
