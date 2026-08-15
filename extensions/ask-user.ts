@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.84.1
+// Last verified working with Pi v0.84.2
 /**
  * ask_user - Ask one or more multiple-choice questions in a bounded wizard.
  *

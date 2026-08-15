@@ -25,3 +25,4 @@ Pi loads the extensions declared by the package manifest. If Pi is already runni
 | `restore-files`           | Tracks file checkpoints and can restore code alongside conversation tree navigation.                   |
 | `continue-agent-turn`     | Continues the current agent turn with `Ctrl+R`, retrying interrupted attempts when necessary.          |
 | `status-footer`           | Replaces the footer with cwd, usage, context, model, thinking, and extension status info.               |
+| `transcribe`              | Adds local speech-to-text dictation, a live recording meter, and `/transcribe` settings.                |

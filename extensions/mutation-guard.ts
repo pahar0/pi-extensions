@@ -1,5 +1,5 @@
-// Last verified working with Pi v0.84.1
-import { completeSimple, type Usage } from "@earendil-works/pi-ai/compat";
+// Last verified working with Pi v0.84.2
+import type { Usage } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -1106,14 +1106,6 @@ async function generateToolExplanation(
 		return { text: "Explanation unavailable: no model is currently selected." };
 	}
 
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (auth.ok === false) {
-		return { text: `Explanation unavailable: ${auth.error}` };
-	}
-	if (!auth.apiKey) {
-		return { text: `Explanation unavailable: no API key available for ${model.provider}/${model.id}.` };
-	}
-
 	const prompt = [
 		"Explain this proposed coding-agent tool invocation for a user approval dialog.",
 		"Return exactly three brief paragraphs, with at most one sentence per paragraph:",
@@ -1130,7 +1122,7 @@ async function generateToolExplanation(
 		"</preview>",
 	].join("\n");
 
-	const response = await completeSimple(
+	const response = await ctx.modelRegistry.complete(
 		model,
 		{
 			systemPrompt:
@@ -1144,11 +1136,9 @@ async function generateToolExplanation(
 			],
 		},
 		{
-			apiKey: auth.apiKey,
-			headers: auth.headers,
 			signal: ctx.signal,
 			// Explicitly request no thinking/reasoning for this lightweight UI explanation.
-			onPayload: async (payload) => {
+			onPayload: async (payload: unknown) => {
 				if (!payload || typeof payload !== "object") return payload;
 				const next = { ...(payload as Record<string, unknown>) };
 				if ("reasoning" in next) next.reasoning = { effort: "none" };

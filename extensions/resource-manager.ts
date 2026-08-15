@@ -1,15 +1,15 @@
-// Last verified working with Pi v0.84.1
+// Last verified working with Pi v0.84.2
 // Generic resource manager for Pi extensions and skills.
-import { existsSync } from "node:fs";
-import { readdir, rename, rm } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, relative } from "node:path";
 import {
-	CONFIG_DIR_NAME,
 	DefaultPackageManager,
 	getAgentDir,
 	SettingsManager,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
+	type PackageSource,
+	type PathMetadata,
+	type ResolvedResource,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -25,148 +25,38 @@ interface ManagedResource {
 	kind: Kind;
 	status: Status;
 	path: string;
-	entryPath: string;
+	metadata: PathMetadata;
 }
-
-interface ManagedResourceBulkAction {
-	mode: "bulk";
-	action: "enableAll" | "disableAll";
-	label: string;
-}
-
-type ManagedResourceSelection = ManagedResource | ManagedResourceBulkAction;
 
 interface ResourceConfig {
 	type: ResourceType;
-	plural: string;
+	plural: "extensions" | "skills";
 	command: string;
 	description: string;
-	globalDir: () => string;
-	projectDir: (cwd: string) => string;
-	scan: (baseDir: string, scope: Scope, config: ResourceConfig) => Promise<ManagedResource[]>;
-	setEnabled: (item: ManagedResource, enabled: boolean) => Promise<void>;
-	isProtected?: (item: ManagedResource) => boolean;
+	getProtectionReason?: (item: ManagedResource) => string | undefined;
 	isHidden?: (item: ManagedResource) => boolean;
 }
 
-function getGlobalExtensionsDir(): string {
-	return join(getAgentDir(), "extensions");
+function resourceName(type: ResourceType, path: string): string {
+	const fileName = basename(path);
+	if (type === "skill" && fileName === "SKILL.md") return basename(dirname(path));
+	if (type === "extension" && ["index.ts", "index.js"].includes(fileName)) return basename(dirname(path));
+	return fileName.replace(/\.(?:md|ts|js)$/i, "");
 }
 
-function getProjectExtensionsDir(cwd: string): string {
-	return join(cwd, CONFIG_DIR_NAME, "extensions");
-}
-
-function getGlobalSkillsDir(): string {
-	return join(getAgentDir(), "skills");
-}
-
-function getProjectSkillsDir(cwd: string): string {
-	return join(cwd, CONFIG_DIR_NAME, "skills");
-}
-
-async function scanExtensions(baseDir: string, scope: Scope, config: ResourceConfig): Promise<ManagedResource[]> {
-	if (!existsSync(baseDir)) return [];
-
-	const dirents = await readdir(baseDir, { withFileTypes: true });
-	const items: ManagedResource[] = [];
-
-	for (const dirent of dirents) {
-		const fullPath = join(baseDir, dirent.name);
-
-		if (dirent.isFile()) {
-			if (dirent.name.endsWith(".ts") && !dirent.name.endsWith(".d.ts")) {
-				items.push({ type: config.type, name: dirent.name.slice(0, -3), scope, kind: "file", status: "enabled", path: fullPath, entryPath: fullPath });
-				continue;
-			}
-
-			if (dirent.name.endsWith(".ts.disabled") && !dirent.name.endsWith(".d.ts.disabled")) {
-				items.push({ type: config.type, name: dirent.name.slice(0, -12), scope, kind: "file", status: "disabled", path: fullPath.slice(0, -9), entryPath: fullPath });
-			}
-			continue;
-		}
-
-		if (dirent.isDirectory()) {
-			const enabledEntry = join(fullPath, "index.ts");
-			const disabledEntry = join(fullPath, "index.ts.disabled");
-
-			if (existsSync(enabledEntry)) {
-				items.push({ type: config.type, name: dirent.name, scope, kind: "directory", status: "enabled", path: fullPath, entryPath: enabledEntry });
-				continue;
-			}
-
-			if (existsSync(disabledEntry)) {
-				items.push({ type: config.type, name: dirent.name, scope, kind: "directory", status: "disabled", path: fullPath, entryPath: disabledEntry });
-			}
-		}
-	}
-
-	return sortResources(items);
-}
-
-function shouldSkipSkillDirectory(name: string): boolean {
-	return name === "node_modules" || name === ".git" || name === ".hg" || name === ".svn";
-}
-
-async function scanSkillDirectories(baseDir: string, scope: Scope, config: ResourceConfig): Promise<ManagedResource[]> {
-	if (!existsSync(baseDir)) return [];
-
-	const items: ManagedResource[] = [];
-
-	async function visit(dir: string): Promise<void> {
-		const enabledEntry = join(dir, "SKILL.md");
-		const disabledEntry = join(dir, "SKILL.md.disabled");
-
-		if (dir !== baseDir && existsSync(enabledEntry)) {
-			items.push({ type: config.type, name: basename(dir), scope, kind: "directory", status: "enabled", path: dir, entryPath: enabledEntry });
-			return;
-		}
-
-		if (dir !== baseDir && existsSync(disabledEntry)) {
-			items.push({ type: config.type, name: basename(dir), scope, kind: "directory", status: "disabled", path: dir, entryPath: disabledEntry });
-			return;
-		}
-
-		const dirents = await readdir(dir, { withFileTypes: true });
-		for (const dirent of dirents) {
-			if (!dirent.isDirectory() || shouldSkipSkillDirectory(dirent.name)) continue;
-			await visit(join(dir, dirent.name));
-		}
-	}
-
-	await visit(baseDir);
-	return items;
-}
-
-async function scanRootSkillFiles(baseDir: string, scope: Scope, config: ResourceConfig): Promise<ManagedResource[]> {
-	if (!existsSync(baseDir)) return [];
-
-	const dirents = await readdir(baseDir, { withFileTypes: true });
-	const items: ManagedResource[] = [];
-
-	for (const dirent of dirents) {
-		if (!dirent.isFile()) continue;
-		const fullPath = join(baseDir, dirent.name);
-
-		if (dirent.name.endsWith(".md") && !dirent.name.endsWith(".d.md")) {
-			items.push({ type: config.type, name: dirent.name.slice(0, -3), scope, kind: "file", status: "enabled", path: fullPath, entryPath: fullPath });
-			continue;
-		}
-
-		if (dirent.name.endsWith(".md.disabled")) {
-			items.push({ type: config.type, name: dirent.name.slice(0, -12), scope, kind: "file", status: "disabled", path: fullPath.slice(0, -9), entryPath: fullPath });
-		}
-	}
-
-	return items;
-}
-
-async function scanSkills(baseDir: string, scope: Scope, config: ResourceConfig): Promise<ManagedResource[]> {
-	const [files, directories] = await Promise.all([
-		scanRootSkillFiles(baseDir, scope, config),
-		scanSkillDirectories(baseDir, scope, config),
-	]);
-	return sortResources([...files, ...directories]);
+function toManagedResource(type: ResourceType, resource: ResolvedResource): ManagedResource {
+	const fileName = basename(resource.path);
+	return {
+		type,
+		name: resourceName(type, resource.path),
+		scope: resource.metadata.origin === "package"
+			? "package"
+			: resource.metadata.scope === "project" ? "project" : "global",
+		kind: fileName === "SKILL.md" || ["index.ts", "index.js"].includes(fileName) ? "directory" : "file",
+		status: resource.enabled ? "enabled" : "disabled",
+		path: resource.path,
+		metadata: resource.metadata,
+	};
 }
 
 function sortResources(items: ManagedResource[]): ManagedResource[] {
@@ -178,61 +68,21 @@ function sortResources(items: ManagedResource[]): ManagedResource[] {
 	});
 }
 
-async function scanPackageResourceDirs(cwd: string, projectTrusted: boolean, type: ResourceType): Promise<string[]> {
+async function scanAll(
+	cwd: string,
+	projectTrusted: boolean,
+	config: ResourceConfig,
+): Promise<{ items: ManagedResource[]; settingsManager: SettingsManager }> {
 	const agentDir = getAgentDir();
-	const conventionalDir = type === "extension" ? "extensions" : "skills";
-	const roots: Array<{ path: string; depth: number }> = [
-		{ path: join(agentDir, "git"), depth: 4 },
-		{ path: join(agentDir, "npm"), depth: 4 },
-	];
-	const dirs: string[] = [];
-	const seen = new Set<string>();
-
-	try {
-		const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
-		const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
-		for (const pkg of packageManager.listConfiguredPackages()) {
-			if (pkg.installedPath) roots.push({ path: pkg.installedPath, depth: 0 });
-		}
-	} catch {
-		// Keep the conventional npm/git fallback if package settings cannot be read.
-	}
-
-	async function visit(dir: string, depth: number): Promise<void> {
-		if (!existsSync(dir) || depth < 0) return;
-
-		const resourceDir = join(dir, conventionalDir);
-		if (existsSync(resourceDir) && !seen.has(resourceDir)) {
-			seen.add(resourceDir);
-			dirs.push(resourceDir);
-		}
-
-		let dirents;
-		try {
-			dirents = await readdir(dir, { withFileTypes: true });
-		} catch {
-			return;
-		}
-
-		for (const dirent of dirents) {
-			if (!dirent.isDirectory() || dirent.name === ".git" || dirent.name === "node_modules") continue;
-			await visit(join(dir, dirent.name), depth - 1);
-		}
-	}
-
-	for (const root of roots) await visit(root.path, root.depth);
-	return dirs;
-}
-
-async function scanAll(cwd: string, projectTrusted: boolean, config: ResourceConfig): Promise<ManagedResource[]> {
-	const packageDirs = await scanPackageResourceDirs(cwd, projectTrusted, config.type);
-	const [globalItems, projectItems, packageItemGroups] = await Promise.all([
-		config.scan(config.globalDir(), "global", config),
-		config.scan(config.projectDir(cwd), "project", config),
-		Promise.all(packageDirs.map((dir) => config.scan(dir, "package", config))),
-	]);
-	const items = sortResources([...globalItems, ...projectItems, ...packageItemGroups.flat()]);
-	return config.isHidden ? items.filter((item) => !config.isHidden!(item)) : items;
+	const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
+	const resolved = await packageManager.resolve(async () => "skip");
+	const resources = config.type === "extension" ? resolved.extensions : resolved.skills;
+	const items = sortResources(resources.map((resource) => toManagedResource(config.type, resource)));
+	return {
+		items: config.isHidden ? items.filter((item) => !config.isHidden!(item)) : items,
+		settingsManager,
+	};
 }
 
 function getDisplayFields(item: ManagedResource): { name: string; status: string; scope: string; kind: string } {
@@ -248,49 +98,22 @@ async function selectManagedResource(
 	ctx: ExtensionCommandContext,
 	config: ResourceConfig,
 	items: ManagedResource[],
-): Promise<ManagedResourceSelection | null> {
-	type Row =
-		| { rowType: "action"; disabled: boolean; label: string; selection: ManagedResourceBulkAction; name: string; status: string; scope: string; kind: string }
-		| { rowType: "separator" }
-		| ({ rowType: "item"; item: ManagedResource } & ReturnType<typeof getDisplayFields>);
-
-	const isProtected = config.isProtected ?? (() => false);
-	const itemRows: Row[] = items.map((item) => ({ rowType: "item", item, ...getDisplayFields(item) }));
-	const canEnableAll = items.some((item) => item.status === "disabled");
-	const canDisableAll = items.some((item) => item.status === "enabled" && !isProtected(item));
-	const rows: Row[] = [
-		{ rowType: "action", disabled: !canEnableAll, label: "Enable all", selection: { mode: "bulk", action: "enableAll", label: "Enable all" }, name: "Enable all", status: canEnableAll ? "" : "all ON", scope: "", kind: "" },
-		{ rowType: "action", disabled: !canDisableAll, label: "Disable all", selection: { mode: "bulk", action: "disableAll", label: "Disable all" }, name: "Disable all", status: canDisableAll ? "" : "all OFF", scope: "", kind: "" },
-		{ rowType: "separator" },
-		...itemRows,
-	];
-	const visibleRows = rows.flatMap((row) => row.rowType === "separator" ? [] : [row]);
+): Promise<ManagedResource | null> {
+	const rows = items.map((item) => ({ item, ...getDisplayFields(item) }));
 	const nameHeader = "name";
 	const statusHeader = "status";
 	const scopeHeader = "scope";
 	const kindHeader = "kind";
-	const statusWidth = Math.max(statusHeader.length, ...visibleRows.map((row) => row.status.length));
-	const scopeWidth = Math.max(scopeHeader.length, ...visibleRows.map((row) => row.scope.length));
-	const kindWidth = Math.max(kindHeader.length, ...visibleRows.map((row) => row.kind.length));
+	const statusWidth = Math.max(statusHeader.length, ...rows.map((row) => row.status.length));
+	const scopeWidth = Math.max(scopeHeader.length, ...rows.map((row) => row.scope.length));
+	const kindWidth = Math.max(kindHeader.length, ...rows.map((row) => row.kind.length));
 
-	return await ctx.ui.custom<ManagedResourceSelection | null>((tui, theme, keybindings, done) => {
-		let selectedIndex = rows.findIndex((row) => row.rowType !== "separator" && !(row.rowType === "action" && row.disabled));
-		if (selectedIndex < 0) selectedIndex = 0;
+	return await ctx.ui.custom<ManagedResource | null>((tui, theme, keybindings, done) => {
+		let selectedIndex = 0;
 		let scrollOffset = 0;
 
-		const isSelectable = (index: number) => {
-			const row = rows[index];
-			return !!row && row.rowType !== "separator" && !(row.rowType === "action" && row.disabled);
-		};
 		const moveSelection = (delta: number) => {
-			let next = selectedIndex;
-			do {
-				next = Math.max(0, Math.min(rows.length - 1, next + delta));
-			} while (!isSelectable(next) && next !== selectedIndex && next > 0 && next < rows.length - 1);
-			if (isSelectable(next)) selectedIndex = next;
-		};
-		const clampScrollOffset = (maxOffset: number) => {
-			scrollOffset = Math.max(0, Math.min(scrollOffset, Math.max(0, maxOffset)));
+			selectedIndex = Math.max(0, Math.min(rows.length - 1, selectedIndex + delta));
 		};
 		const enabledCount = items.filter((item) => item.status === "enabled").length;
 		const disabledCount = items.length - enabledCount;
@@ -331,17 +154,14 @@ async function selectManagedResource(
 
 				if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
 				if (selectedIndex >= scrollOffset + visibleRowCount) scrollOffset = selectedIndex - visibleRowCount + 1;
-				clampScrollOffset(maxOffset);
+				scrollOffset = Math.max(0, Math.min(scrollOffset, maxOffset));
 
 				const viewport = rows.slice(scrollOffset, scrollOffset + visibleRowCount);
 				const scrollInfo = rows.length > visibleRowCount
 					? ` · ${scrollOffset + 1}-${Math.min(rows.length, scrollOffset + visibleRowCount)}/${rows.length}`
 					: "";
 				const headerLeft = ` ${theme.bold(theme.fg("accent", capitalize(config.plural)))}`;
-				const headerRight = theme.fg(
-					"dim",
-					`${items.length} total · ${enabledCount} on · ${disabledCount} off `,
-				);
+				const headerRight = theme.fg("dim", `${items.length} total · ${enabledCount} on · ${disabledCount} off `);
 				const columnHeader =
 					`     ${padPlain(nameHeader, effectiveNameWidth)}  ` +
 					`${padPlain(statusHeader, statusWidth)}  ` +
@@ -363,42 +183,23 @@ async function selectManagedResource(
 				);
 
 				for (let index = 0; index < visibleRowCount; index++) {
-					const rowIndex = scrollOffset + index;
 					const row = viewport[index];
 					if (!row) {
 						lines.push(panelBorder + " ".repeat(innerWidth) + panelBorder);
 						continue;
 					}
-					if (row.rowType === "separator") {
-						lines.push(
-							panelBorder +
-								theme.fg("borderMuted", fit(`  ${"─".repeat(Math.max(0, innerWidth - 2))}`, innerWidth)) +
-								panelBorder,
-						);
-						continue;
-					}
 
-					const selected = rowIndex === selectedIndex;
+					const selected = scrollOffset + index === selectedIndex;
 					const marker = selected ? theme.fg("accent", " ❯ ") : "   ";
-					const glyph = row.rowType === "action"
-						? theme.fg(row.disabled ? "dim" : "accent", "◆ ")
-						: theme.fg(row.status === "ON" ? "success" : "dim", "■ ");
+					const glyph = theme.fg(row.status === "ON" ? "success" : "dim", "■ ");
 					const namePlain = padPlain(row.name, effectiveNameWidth);
-					const name = row.rowType === "action" && row.disabled
+					const name = row.status === "OFF"
 						? theme.fg("dim", namePlain)
-						: row.rowType === "item" && row.status === "OFF"
-							? theme.fg("dim", namePlain)
-							: selected
-								? theme.fg("accent", namePlain)
-								: theme.fg("text", namePlain);
-					const statusPlain = padPlain(row.status, statusWidth);
-					const status = row.rowType === "action"
-						? theme.fg(row.disabled ? "dim" : "muted", statusPlain)
-						: theme.fg(row.status === "ON" ? "success" : "dim", statusPlain);
+						: selected ? theme.fg("accent", namePlain) : theme.fg("text", namePlain);
+					const status = theme.fg(row.status === "ON" ? "success" : "dim", padPlain(row.status, statusWidth));
 					const scope = theme.fg(selected ? "accent" : "muted", padPlain(row.scope, scopeWidth));
 					const kind = theme.fg(selected ? "accent" : "dim", padPlain(row.kind, kindWidth));
-					const content = `${marker}${glyph}${name}  ${status}  ${scope}  ${kind}`;
-					lines.push(panelBorder + fit(content, innerWidth) + panelBorder);
+					lines.push(panelBorder + fit(`${marker}${glyph}${name}  ${status}  ${scope}  ${kind}`, innerWidth) + panelBorder);
 				}
 
 				lines.push(
@@ -406,13 +207,7 @@ async function selectManagedResource(
 						theme.fg("borderMuted", "─".repeat(innerWidth)) +
 						theme.fg("borderMuted", "╯"),
 				);
-				lines.push(
-					truncateToWidth(
-						theme.fg("dim", " ↑↓ navigate · enter select · esc close"),
-						outerWidth,
-						"",
-					),
-				);
+				lines.push(truncateToWidth(theme.fg("dim", " ↑↓ navigate · enter select · esc close"), outerWidth, ""));
 				return lines.map((line) => truncateToWidth(line, outerWidth, ""));
 			},
 			invalidate() {},
@@ -428,9 +223,7 @@ async function selectManagedResource(
 					return;
 				}
 				if (keybindings.matches(data, "tui.select.confirm")) {
-					const row = rows[selectedIndex];
-					if (row?.rowType === "action" && !row.disabled) done(row.selection);
-					else if (row?.rowType === "item") done(row.item);
+					done(rows[selectedIndex]?.item ?? null);
 					return;
 				}
 				if (keybindings.matches(data, "tui.select.cancel")) done(null);
@@ -443,56 +236,89 @@ function capitalize(text: string): string {
 	return text.slice(0, 1).toUpperCase() + text.slice(1);
 }
 
-async function setExtensionEnabled(item: ManagedResource, enabled: boolean): Promise<void> {
-	if (item.kind === "file") {
-		const from = enabled ? `${item.path}.disabled` : item.path;
-		const to = enabled ? item.path : `${item.path}.disabled`;
-		await rename(from, to);
-		return;
-	}
-
-	const from = enabled ? join(item.path, "index.ts.disabled") : join(item.path, "index.ts");
-	const to = enabled ? join(item.path, "index.ts") : join(item.path, "index.ts.disabled");
-	await rename(from, to);
+function patternTarget(pattern: string): string {
+	return ["!", "+", "-"].includes(pattern[0] ?? "") ? pattern.slice(1) : pattern;
 }
 
-async function setSkillEnabled(item: ManagedResource, enabled: boolean): Promise<void> {
-	if (item.kind === "file") {
-		const from = enabled ? `${item.path}.disabled` : item.path;
-		const to = enabled ? item.path : `${item.path}.disabled`;
-		await rename(from, to);
-		return;
-	}
-
-	const from = enabled ? join(item.path, "SKILL.md.disabled") : join(item.path, "SKILL.md");
-	const to = enabled ? join(item.path, "SKILL.md") : join(item.path, "SKILL.md.disabled");
-	await rename(from, to);
+function updatedPatterns(current: string[], pattern: string, enabled: boolean): string[] {
+	return [
+		...current.filter((entry) => patternTarget(entry) !== pattern),
+		`${enabled ? "+" : "-"}${pattern}`,
+	];
 }
 
-function isProtectedExtension(item: ManagedResource): boolean {
-	return item.scope !== "project" && ["resource-manager", "extensions", "skills"].includes(item.name);
+function setTopLevelResourceEnabled(
+	settingsManager: SettingsManager,
+	item: ManagedResource,
+	enabled: boolean,
+): void {
+	if (item.metadata.scope !== "user") {
+		throw new Error("Project resources are read-only here to avoid changing the application repository");
+	}
+
+	const key = item.type === "extension" ? "extensions" : "skills";
+	const current = (settingsManager.getGlobalSettings()[key] ?? []) as string[];
+	const baseDir = item.metadata.baseDir ?? getAgentDir();
+	const updated = updatedPatterns(current, relative(baseDir, item.path), enabled);
+	if (key === "extensions") settingsManager.setExtensionPaths(updated);
+	else settingsManager.setSkillPaths(updated);
+}
+
+function setPackageResourceEnabled(
+	settingsManager: SettingsManager,
+	item: ManagedResource,
+	enabled: boolean,
+): void {
+	if (item.metadata.scope !== "user") {
+		throw new Error("Project package resources are read-only here to avoid changing the application repository");
+	}
+
+	const packages = [...(settingsManager.getGlobalSettings().packages ?? [])] as PackageSource[];
+	const packageIndex = packages.findIndex((pkg) =>
+		(typeof pkg === "string" ? pkg : pkg.source) === item.metadata.source,
+	);
+	if (packageIndex < 0) throw new Error(`Package source not found in global settings: ${item.metadata.source}`);
+
+	let pkg = packages[packageIndex]!;
+	if (typeof pkg === "string") {
+		pkg = { source: pkg };
+		packages[packageIndex] = pkg;
+	}
+
+	const key = item.type === "extension" ? "extensions" : "skills";
+	const current = (pkg[key] ?? []) as string[];
+	const baseDir = item.metadata.baseDir ?? dirname(item.path);
+	pkg[key] = updatedPatterns(current, relative(baseDir, item.path), enabled);
+	settingsManager.setPackages(packages);
+}
+
+function setResourceEnabled(
+	settingsManager: SettingsManager,
+	item: ManagedResource,
+	enabled: boolean,
+): void {
+	if (item.metadata.origin === "package") {
+		setPackageResourceEnabled(settingsManager, item, enabled);
+	} else {
+		setTopLevelResourceEnabled(settingsManager, item, enabled);
+	}
+}
+
+function getProtectionReason(item: ManagedResource): string | undefined {
+	if (item.metadata.scope === "project") {
+		return "Project resources are read-only in this manager to avoid modifying .pi/settings.json";
+	}
+	return undefined;
 }
 
 function isHiddenExtension(item: ManagedResource): boolean {
-	return item.scope !== "project" && item.name === "resource-manager";
+	return item.type === "extension" && basename(item.path) === "resource-manager.ts";
 }
 
-async function setAllEnabled(items: ManagedResource[], config: ResourceConfig, enabled: boolean): Promise<number> {
-	const isProtected = config.isProtected ?? (() => false);
-	const targets = items.filter((item) => {
-		if (!enabled && isProtected(item)) return false;
-		return item.status !== (enabled ? "enabled" : "disabled");
-	});
-	for (const item of targets) await config.setEnabled(item, enabled);
-	return targets.length;
-}
-
-async function uninstall(item: ManagedResource): Promise<void> {
-	if (item.kind === "file") {
-		await rm(item.entryPath, { force: true });
-		return;
-	}
-	await rm(item.path, { recursive: true, force: true });
+async function persistSettings(settingsManager: SettingsManager): Promise<void> {
+	await settingsManager.flush();
+	const errors = settingsManager.drainErrors();
+	if (errors.length > 0) throw errors[0]!.error;
 }
 
 async function reloadAndExit(ctx: ExtensionCommandContext, message: string): Promise<void> {
@@ -507,7 +333,7 @@ async function runManager(ctx: ExtensionCommandContext, config: ResourceConfig):
 	}
 
 	while (true) {
-		const items = await scanAll(ctx.cwd, ctx.isProjectTrusted(), config);
+		const { items, settingsManager } = await scanAll(ctx.cwd, ctx.isProjectTrusted(), config);
 
 		if (items.length === 0) {
 			ctx.ui.notify(`No custom global, project, or package ${config.plural} found`, "info");
@@ -517,35 +343,19 @@ async function runManager(ctx: ExtensionCommandContext, config: ResourceConfig):
 		const item = await selectManagedResource(ctx, config, items);
 		if (!item) return;
 
-		if ("mode" in item) {
-			const enabled = item.action === "enableAll";
-			const verb = enabled ? "Enable" : "Disable";
-			const ok = await ctx.ui.confirm(`${verb} all ${config.plural}`, `${verb} all custom global, project, and package ${config.plural}?`);
-			if (!ok) continue;
-
-			try {
-				const count = await setAllEnabled(items, config, enabled);
-				if (count === 0) {
-					ctx.ui.notify(`All ${config.plural} are already ${enabled ? "enabled" : "disabled"}`, "info");
-					continue;
-				}
-				await reloadAndExit(ctx, `${enabled ? "Enabled" : "Disabled"} ${count} ${config.type}${count === 1 ? "" : "s"}`);
-				return;
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`${capitalize(config.type)} manager error: ${message}`, "error");
-				continue;
-			}
+		const protectionReason = config.getProtectionReason?.(item);
+		if (protectionReason) {
+			ctx.ui.notify(protectionReason, "info");
+			continue;
 		}
 
-		const protectedItem = config.isProtected?.(item) ?? false;
-		const actions = protectedItem ? ["Back"] : [item.status === "enabled" ? "Disable" : "Enable", "Uninstall", "Back"];
-		const action = await ctx.ui.select(`Manage ${item.name}`, actions);
+		const action = await ctx.ui.select(`Manage ${item.name}`, [item.status === "enabled" ? "Disable" : "Enable", "Back"]);
 		if (!action || action === "Back") continue;
 
 		try {
 			if (action === "Enable") {
-				await config.setEnabled(item, true);
+				setResourceEnabled(settingsManager, item, true);
+				await persistSettings(settingsManager);
 				await reloadAndExit(ctx, `Enabled ${item.name}`);
 				return;
 			}
@@ -553,21 +363,10 @@ async function runManager(ctx: ExtensionCommandContext, config: ResourceConfig):
 			if (action === "Disable") {
 				const ok = await ctx.ui.confirm(`Disable ${config.type}`, `Disable ${item.name}?`);
 				if (!ok) continue;
-				await config.setEnabled(item, false);
+				setResourceEnabled(settingsManager, item, false);
+				await persistSettings(settingsManager);
 				await reloadAndExit(ctx, `Disabled ${item.name}`);
 				return;
-			}
-
-			if (action === "Uninstall") {
-				const ok = await ctx.ui.confirm(`Uninstall ${config.type}`, `Permanently delete ${item.name} (${basename(item.path)})?`);
-				if (!ok) continue;
-				await uninstall(item);
-				if (item.status === "enabled") {
-					await reloadAndExit(ctx, `Uninstalled ${item.name}`);
-					return;
-				}
-				ctx.ui.notify(`Uninstalled ${item.name}`, "info");
-				continue;
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -581,23 +380,16 @@ const configs: ResourceConfig[] = [
 		type: "extension",
 		plural: "extensions",
 		command: "extensions",
-		description: "Manage custom global, project, and package extensions",
-		globalDir: getGlobalExtensionsDir,
-		projectDir: getProjectExtensionsDir,
-		scan: scanExtensions,
-		setEnabled: setExtensionEnabled,
-		isProtected: isProtectedExtension,
+		description: "Manage personal extension preferences",
+		getProtectionReason,
 		isHidden: isHiddenExtension,
 	},
 	{
 		type: "skill",
 		plural: "skills",
 		command: "skills",
-		description: "Manage custom global, project, and package skills",
-		globalDir: getGlobalSkillsDir,
-		projectDir: getProjectSkillsDir,
-		scan: scanSkills,
-		setEnabled: setSkillEnabled,
+		description: "Manage personal skill preferences",
+		getProtectionReason,
 	},
 ];
 
@@ -610,7 +402,7 @@ export default function resourceManager(pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("resources", {
-		description: "Manage custom global, project, and package extensions or skills",
+		description: "Manage personal extension and skill preferences",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") {
 				if (ctx.hasUI) ctx.ui.notify("Resource manager requires TUI mode", "warning");

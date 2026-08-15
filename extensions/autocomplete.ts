@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.84.1
+// Last verified working with Pi v0.84.2
 /**
  * Autocomplete — manual inline completion for Pi's input editor.
  *
@@ -8,7 +8,6 @@
  * Nothing is submitted automatically.
  */
 
-import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
 	CustomEditor,
 	type ExtensionAPI,
@@ -163,11 +162,7 @@ async function generateSuggestion(
 	const model = ctx.model;
 	if (!model) throw new Error("No model is currently selected for autocomplete");
 
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (!auth.ok) throw new Error(auth.error);
-	if (!auth.apiKey) throw new Error(`No credentials available for ${model.provider}/${model.id}`);
-
-	const response = await completeSimple(
+	const response = await ctx.modelRegistry.complete(
 		model,
 		{
 			systemPrompt: [
@@ -190,11 +185,8 @@ async function generateSuggestion(
 			],
 		},
 		{
-			apiKey: auth.apiKey,
-			headers: auth.headers,
-			env: auth.env,
 			signal,
-			onPayload: async (payload) => {
+			onPayload: async (payload: unknown) => {
 				if (!payload || typeof payload !== "object") return payload;
 				const next = { ...(payload as Record<string, unknown>) };
 				if ("reasoning" in next) next.reasoning = { effort: "none" };
