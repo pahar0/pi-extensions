@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.84.2
+// Last verified working with Pi v0.84.4
 import type { Api, Model, Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";

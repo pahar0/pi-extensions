@@ -1,4 +1,4 @@
-// Last verified working with Pi v0.84.2
+// Last verified working with Pi v0.84.4
 // Generic resource manager for Pi extensions and skills.
 import { basename, dirname, relative } from "node:path";
 import {
