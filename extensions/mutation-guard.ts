@@ -50,6 +50,24 @@ type EditBlock = {
 
 type Edit = { oldText: string; newText: string };
 
+type PreviewEditToolContext = ExtensionContext & {
+	readonly tools: readonly never[];
+	executeTool: () => Promise<never>;
+};
+
+function createPreviewEditToolContext(ctx: ExtensionContext): PreviewEditToolContext {
+	const previewContext = Object.create(ctx) as PreviewEditToolContext;
+	Object.defineProperties(previewContext, {
+		tools: { value: Object.freeze([]), enumerable: true },
+		executeTool: {
+			value: async () => {
+				throw new Error("Nested tool execution is unavailable while building an edit preview.");
+			},
+			enumerable: true,
+		},
+	});
+	return previewContext;
+}
 
 function normalizePath(path: unknown): string {
 	if (typeof path !== "string" || path.trim().length === 0) return "(unknown path)";
@@ -894,7 +912,7 @@ async function buildEditPreview(
 			{ path: displayPath, edits } as never,
 			undefined,
 			undefined,
-			ctx,
+			createPreviewEditToolContext(ctx),
 		);
 		const gitDiff = previewContent === undefined ? undefined : await renderGitStyleDiff(originalContent, previewContent, displayPath, ctx.ui.theme);
 		if (gitDiff) return gitDiff;

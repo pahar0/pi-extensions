@@ -8,6 +8,13 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 type BackupRef = string | null;
+type BackupCreationResult =
+  | { kind: "backup"; ref: BackupRef }
+  | { kind: "unsupported" };
+type PathState =
+  | { kind: "file" }
+  | { kind: "missing" }
+  | { kind: "unsupported" };
 
 type Snapshot = {
   entryId: string;
@@ -280,6 +287,16 @@ export default function (pi: ExtensionAPI) {
     dirtySnapshotEntryIds.add(entryId);
   }
 
+  function untrackUnsupportedPath(fileKey: string): void {
+    trackedFiles.delete(fileKey);
+
+    for (const snapshot of snapshots) {
+      if (!(fileKey in snapshot.files)) continue;
+      delete snapshot.files[fileKey];
+      markSnapshotDirty(snapshot.entryId);
+    }
+  }
+
   function getReferencedBackupRefs(): Set<string> {
     const refs = new Set<string>();
     for (const snapshot of snapshots) {
@@ -299,6 +316,19 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function inspectPath(path: string): Promise<PathState> {
+    try {
+      const st = await stat(path);
+      return st.isFile() ? { kind: "file" } : { kind: "unsupported" };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return { kind: "missing" };
+      }
+      throw error;
+    }
+  }
+
   async function hashFileSha256(path: string): Promise<string> {
     return await new Promise<string>((resolveHash, rejectHash) => {
       const hash = createHash("sha256");
@@ -311,10 +341,14 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  async function createBackup(cwd: string, fileKey: string): Promise<BackupRef> {
+  async function createBackup(cwd: string, fileKey: string): Promise<BackupCreationResult> {
     const source = absPath(cwd, fileKey);
-    if (!(await pathExists(source))) {
-      return null;
+    const sourceState = await inspectPath(source);
+    if (sourceState.kind === "missing") {
+      return { kind: "backup", ref: null };
+    }
+    if (sourceState.kind === "unsupported") {
+      return { kind: "unsupported" };
     }
 
     const version = bumpVersion(fileKey);
@@ -331,7 +365,7 @@ export default function (pi: ExtensionAPI) {
       // best effort
     }
 
-    return ref;
+    return { kind: "backup", ref };
   }
 
   async function filesEqual(currentPath: string, backupFilePath: string): Promise<boolean> {
@@ -507,9 +541,13 @@ export default function (pi: ExtensionAPI) {
     for (const fileKey of trackedFiles) {
       const previousRef = previous?.files[fileKey];
       const file = absPath(ctx.cwd, fileKey);
-      const exists = await pathExists(file);
+      const fileState = await inspectPath(file);
 
-      if (!exists) {
+      if (fileState.kind === "unsupported") {
+        untrackUnsupportedPath(fileKey);
+        continue;
+      }
+      if (fileState.kind === "missing") {
         files[fileKey] = null;
         continue;
       }
@@ -525,7 +563,12 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      files[fileKey] = await createBackup(ctx.cwd, fileKey);
+      const result = await createBackup(ctx.cwd, fileKey);
+      if (result.kind === "unsupported") {
+        untrackUnsupportedPath(fileKey);
+        continue;
+      }
+      files[fileKey] = result.ref;
     }
 
     const snapshot: Snapshot = {
@@ -550,20 +593,32 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    trackedFiles.add(fileKey);
+    const fileState = await inspectPath(absPath(ctx.cwd, fileKey));
+    if (fileState.kind === "unsupported") {
+      untrackUnsupportedPath(fileKey);
+      return;
+    }
 
     const snapshot = getLastSnapshot();
-    if (!snapshot) return;
-    if (fileKey in snapshot.files) return;
+    if (!snapshot || fileKey in snapshot.files) {
+      trackedFiles.add(fileKey);
+      return;
+    }
 
-    const initialRef = await createBackup(ctx.cwd, fileKey);
-    snapshot.files[fileKey] = initialRef;
+    const result = await createBackup(ctx.cwd, fileKey);
+    if (result.kind === "unsupported") {
+      untrackUnsupportedPath(fileKey);
+      return;
+    }
+
+    trackedFiles.add(fileKey);
+    snapshot.files[fileKey] = result.ref;
     markSnapshotDirty(snapshot.entryId);
 
     for (const previousSnapshot of snapshots) {
       if (previousSnapshot === snapshot) continue;
       if (fileKey in previousSnapshot.files) continue;
-      previousSnapshot.files[fileKey] = initialRef;
+      previousSnapshot.files[fileKey] = result.ref;
       markSnapshotDirty(previousSnapshot.entryId);
     }
   }

@@ -226,6 +226,8 @@ class AutocompleteEditor extends CustomEditor {
 		keybindings: KeybindingsManager,
 		options: AutocompleteEditorOptions,
 	) {
+		// Intentionally keep Pi's working, compaction, branch-summary, and retry
+		// spinners in standalone rows; do not enable embedWorkingStatus here.
 		super(tui, theme, keybindings);
 		this.keybindingsManager = keybindings;
 		this.options = options;

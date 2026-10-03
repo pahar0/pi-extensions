@@ -35,11 +35,14 @@ type FooterContextLike = {
 	cwd?: string;
 	model?: ModelLike;
 	modelRegistry: {
-		isUsingOAuth: (model: ModelLike) => boolean;
 		getProvider: (provider: string) => Provider | undefined;
+		isUsingOAuth: (model: ModelLike) => boolean;
 	};
 	sessionManager: {
 		getEntries: () => SessionEntryLike[];
+		getEntryCount?: () => number;
+		getLeafId: () => string | null;
+		getSessionId: () => string;
 		getSessionName?: () => string | undefined;
 	};
 	getContextUsage: () => { contextWindow?: number; percent: number | null } | null | undefined;
@@ -101,7 +104,7 @@ export default function statusFooter(pi: ExtensionAPI) {
 		) {
 			return entry.message.usage;
 		}
-		if (entry.type === "compaction" || entry.type === "branch_summary") {
+		if (entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary") {
 			return entry.usage;
 		}
 		return undefined;
@@ -169,12 +172,30 @@ export default function statusFooter(pi: ExtensionAPI) {
 		return theme.fg("dim", percentWithSymbol);
 	}
 
-	function middleLabel(ctx: FooterContextLike, theme: FooterThemeLike): string {
+	type SessionStats = {
+		totalInput: number;
+		totalOutput: number;
+		totalCacheRead: number;
+		totalCacheWrite: number;
+		totalCost: number;
+		latestCacheHitRate?: number;
+		contextUsage: ReturnType<FooterContextLike["getContextUsage"]>;
+	};
+
+	type CachedSessionStats = SessionStats & {
+		sessionId: string;
+		leafId: string | null;
+		entryCount: number;
+		model: ModelLike | undefined;
+	};
+
+	function calculateSessionStats(ctx: FooterContextLike): SessionStats {
 		let totalInput = 0;
 		let totalOutput = 0;
 		let totalCacheRead = 0;
 		let totalCacheWrite = 0;
 		let totalCost = 0;
+		let latestCacheHitRate: number | undefined;
 
 		for (const entry of ctx.sessionManager.getEntries()) {
 			const usage = getEntryUsage(entry);
@@ -184,12 +205,70 @@ export default function statusFooter(pi: ExtensionAPI) {
 			totalCacheRead += usage.cacheRead;
 			totalCacheWrite += usage.cacheWrite;
 			totalCost += usage.cost.total;
+			if (entry.type === "message" && entry.message?.role === "assistant") {
+				const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+				latestCacheHitRate = promptTokens > 0
+					? (usage.cacheRead / promptTokens) * 100
+					: undefined;
+			}
 		}
 
+		return {
+			totalInput,
+			totalOutput,
+			totalCacheRead,
+			totalCacheWrite,
+			totalCost,
+			latestCacheHitRate,
+			contextUsage: ctx.getContextUsage(),
+		};
+	}
+
+	function createSessionStatsGetter(ctx: FooterContextLike): () => SessionStats {
+		let cached: CachedSessionStats | undefined;
+
+		return () => {
+			const entryCount = ctx.sessionManager.getEntryCount?.();
+			const sessionId = ctx.sessionManager.getSessionId();
+			const leafId = ctx.sessionManager.getLeafId();
+			const model = ctx.model;
+
+			if (
+				entryCount !== undefined &&
+				cached?.sessionId === sessionId &&
+				cached.leafId === leafId &&
+				cached.entryCount === entryCount &&
+				cached.model === model
+			) {
+				return cached;
+			}
+
+			const stats = calculateSessionStats(ctx);
+			cached = entryCount === undefined
+				? undefined
+				: { ...stats, sessionId, leafId, entryCount, model };
+			return stats;
+		};
+	}
+
+	function middleLabel(ctx: FooterContextLike, theme: FooterThemeLike, stats: SessionStats): string {
+		const {
+			totalInput,
+			totalOutput,
+			totalCacheRead,
+			totalCacheWrite,
+			totalCost,
+			latestCacheHitRate,
+			contextUsage,
+		} = stats;
 		const parts: string[] = [];
 		if (totalInput) parts.push(`↑${formatTokens(totalInput)}`);
 		if (totalOutput) parts.push(`↓${formatTokens(totalOutput)}`);
+		if (totalCacheRead) parts.push(`R${formatTokens(totalCacheRead)}`);
 		if (totalCacheWrite) parts.push(`W${formatTokens(totalCacheWrite)}`);
+		if ((totalCacheRead || totalCacheWrite) && latestCacheHitRate !== undefined) {
+			parts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+		}
 
 		const usingSubscription = ctx.model
 			? ctx.model.provider === "kimi-coding" ||
@@ -200,7 +279,6 @@ export default function statusFooter(pi: ExtensionAPI) {
 			parts.push(`$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
 		}
 
-		const contextUsage = ctx.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
@@ -218,6 +296,7 @@ export default function statusFooter(pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			const dispose = footerData.onBranchChange(() => tui.requestRender());
+			const getSessionStats = createSessionStatsGetter(ctx);
 			return {
 				dispose,
 				render(width: number) {
@@ -228,7 +307,7 @@ export default function statusFooter(pi: ExtensionAPI) {
 						sessionLabel ? theme.fg("accent", sessionLabel) : "",
 						cwdLabel ? theme.fg("accent", cwdLabel) : "",
 					].filter(Boolean).join(` ${theme.fg("dim", "•")} `);
-					const middle = middleLabel(ctx, theme);
+					const middle = middleLabel(ctx, theme, getSessionStats());
 					const right = rightLabel(ctx, theme, footerData);
 					if (!left && !middle) return [truncateToWidth(right, width)];
 					if (!left) return [truncateToWidth(`${middle} ${right}`.trim(), width)];
