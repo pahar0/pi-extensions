@@ -1,4 +1,4 @@
-// Last verified working with Pi v1.0.1
+// Last verified working with Pi v1.1.0
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";

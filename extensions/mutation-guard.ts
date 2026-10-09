@@ -1,4 +1,4 @@
-// Last verified working with Pi v1.0.1
+// Last verified working with Pi v1.1.0
 import type { Usage } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,

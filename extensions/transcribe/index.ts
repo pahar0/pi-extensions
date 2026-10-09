@@ -1,4 +1,4 @@
-// Last verified working with Pi v1.0.1
+// Last verified working with Pi v1.1.0
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { existsSync } from "node:fs";

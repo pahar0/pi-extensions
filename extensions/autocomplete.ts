@@ -1,4 +1,4 @@
-// Last verified working with Pi v1.0.1
+// Last verified working with Pi v1.1.0
 /**
  * Autocomplete — manual inline completion for Pi's input editor.
  *

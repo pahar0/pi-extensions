@@ -1,4 +1,4 @@
-// Last verified working with Pi v1.0.1
+// Last verified working with Pi v1.1.0
 import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { mkdtemp, writeFile } from "node:fs/promises";
