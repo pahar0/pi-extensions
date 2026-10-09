@@ -32,7 +32,7 @@
     "@huggingface/hub": "2.15.0",
     "@mozilla/readability": "^0.6.0",
     "@picovoice/pvrecorder-node": "1.2.9",
-    "html-to-text": "^10.0.0",
+    "html-to-text": "^10.0.1",
     "ipaddr.js": "^2.2.0",
     "linkedom": "^0.18.13",
     "opencc-js": "^1.4.1",
