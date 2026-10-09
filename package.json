@@ -10,7 +10,8 @@
     "pi-package"
   ],
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "devDependencies": {
     "@types/html-to-text": "^9.0.4",
