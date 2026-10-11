@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { Value } from "typebox/value";
 import type { AgentToolResult, ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import extension, {
-	DirectSearchError, directPageResult, extractInlineMedia, extractReadableHtml, fetchPublicHttpPage,
+	DirectSearchError, HttpFetchError, directPageResult, extractInlineMedia, extractReadableHtml, fetchPublicHttpPage,
 	findTextMatches, isPublicIpAddress, normalizeHttpUrlKey, canonicalHttpAliases, prepareUrlArguments, readLimitedBody,
 	type WebOutput, type WebSearchDependencies,
 } from "../extensions/codex-web-search.ts";
@@ -135,6 +135,50 @@ test("HTTP 503, transport failures and logical errors retry with stable session 
 	}
 });
 
+test("logical errors extract rendered details instead of page metadata", async () => {
+	for (const results of [[{ title: "Internal Error", snippet: "Total lines: 1" }], []]) {
+		const h = harness({ fetch: () => Response.json({
+			output: 'Internal Error ()\n【turn0view0】 [wordlim: 200] Source: open({"ref_id":"https://example.com/page"}); Total lines: 1\nL0: Failed to fetch https://example.com/page: 403 Forbidden',
+			results,
+		}) });
+		await assert.rejects(h.invoke("web_fetch", { url_or_ref: "https://example.com/page", mode: "indexed" }), (error) => {
+			assert.ok(error instanceof DirectSearchError);
+			assert.match(error.message, /Failed to fetch https:\/\/example\.com\/page: 403 Forbidden/);
+			assert.doesNotMatch(error.message, /Total lines|wordlim|Source:|L0:/);
+			return true;
+		});
+		assert.equal(h.calls.length, 3);
+	}
+});
+
+test("logical errors recover structured and unnumbered reasons while suppressing empty metadata", async () => {
+	for (const response of [
+		{ output: "Internal Error", results: [{ title: "Internal Error", snippet: "Total lines: 1", description: "Upstream worker timed out" }] },
+		{ output: "Internal Error\nUpstream worker timed out", results: [{ title: "Internal Error", snippet: "Total lines: 1" }] },
+		{ output: "Internal Error: Upstream worker timed out", results: [] },
+		{ output: "Internal Error", results: [{ title: "Internal Error", content: "Upstream worker timed out" }] },
+	]) {
+		const h = harness({ fetch: () => Response.json(response) });
+		await assert.rejects(h.invoke("web_search", { query: "test" }), /Internal Error\. Upstream worker timed out/);
+	}
+	const metadata = harness({ fetch: () => Response.json({ output: "Internal Error ()\nTotal lines: 1\nL0: Internal Error", results: [{ title: "Internal Error", snippet: "Total lines: 1" }] }) });
+	await assert.rejects(metadata.invoke("web_search", { query: "test" }), { message: "Codex web backend returned Internal Error." });
+	const bounded = harness({ fetch: () => Response.json({ output: `Internal Error\nL0: ${"x".repeat(20_000)}`, results: [{ title: "Internal Error", snippet: "Total lines: 1" }] }) });
+	await assert.rejects(bounded.invoke("web_search", { query: "test" }), (error) => error instanceof DirectSearchError && error.message.includes("xxx") && error.message.length < 4100);
+});
+
+test("rendered unsupported screenshot reasons are terminal even when snippets contain only metadata", async () => {
+	const h = harness({ fetch: () => Response.json({ output: "Internal Error ()\nTotal lines: 1\nL0: Unable to resolve screenshot call because web screenshot is not supported", results: [{ title: "Internal Error", snippet: "Total lines: 1" }] }) });
+	await assert.rejects(h.invoke("web_run", { screenshot: [{ ref_id: "https://example.com/paper.pdf", pageno: 0 }] }), (error) => {
+		assert.ok(error instanceof DirectSearchError);
+		assert.equal(error.kind, "unsupported-operation");
+		assert.match(error.message, /Unable to resolve screenshot call/);
+		assert.doesNotMatch(error.message, /Total lines/);
+		return true;
+	});
+	assert.equal(h.calls.length, 1);
+});
+
 test("retries stop at three attempts, and failed sessions are not persisted", async () => {
 	const h = harness({ fetch: () => new Response("unavailable", { status: 503 }) });
 	await assert.rejects(h.invoke("web_search", { query: "test" }), (error) => error instanceof DirectSearchError && error.status === 503);
@@ -181,6 +225,104 @@ test("remote safety refusal never retries or falls back to local HTTP", async ()
 	const search = await h.invoke("web_search", { query: "test" });
 	await assert.rejects(h.invoke("web_fetch", { url_or_ref: "https://example.com/page", search_session: session(search) }), /not safe/);
 	assert.equal(localCalls, 0); assert.equal(h.calls.length, 2);
+});
+
+test("unmapped live fetch and find failures fall back to Codex with their URL parameters", async () => {
+	for (const [name, extra, command] of [
+		["web_fetch", { line: 7 }, { open: [{ ref_id: "https://example.com/unmapped", lineno: 7 }] }],
+		["web_find", { pattern: "needle" }, { find: [{ ref_id: "https://example.com/unmapped", pattern: "needle" }] }],
+	] as const) {
+		let localCalls = 0;
+		const h = harness({ persistCustom: true, fetchPage: async () => { localCalls++; throw new HttpFetchError("Direct fetch timed out.", "transport"); } });
+		const fetched = await h.invoke(name, { url_or_ref: "https://example.com/unmapped", response_length: "short", ...extra }, undefined, false);
+		assert.equal(localCalls, 1); assert.equal(h.calls.length, 1);
+		assert.equal(fetched.output.backend, "codex-direct"); assert.equal(fetched.output.mode, "live");
+		assert.ok(fetched.output.search_session);
+		assert.deepEqual(h.calls[0]!.body.commands, { ...command, response_length: "short" });
+		assert.equal(typeof h.calls[0]!.body.input, "string");
+		await h.emit("session_start");
+		await h.invoke("web_fetch", { url_or_ref: "turn0search0", search_session: session(fetched) });
+		assert.equal(h.calls[1]!.body.id, h.calls[0]!.body.id);
+	}
+});
+
+test("live HTTP failures use Codex selectively and never bypass URL safety refusals", async () => {
+	for (const failure of [
+		new HttpFetchError("timeout", "transport"), new HttpFetchError("binary content", "unsupported-content"), new HttpFetchError("body too large", "too-large"),
+		...[403, 408, 500, 503, 599].map((status) => new HttpFetchError(`HTTP ${status}`, "http-status", status)),
+	]) {
+		const h = harness({ fetchPage: async () => { throw failure; } });
+		assert.equal((await h.invoke("web_fetch", { url_or_ref: "https://example.com/unmapped" })).output.backend, "codex-direct");
+		assert.equal(h.calls.length, 1);
+	}
+	for (const failure of [
+		new HttpFetchError("DNS resolved to a private address", "unsafe-url"), new HttpFetchError("redirect to a private URL", "unsafe-url"),
+		...[301, 401, 404, 429].map((status) => new HttpFetchError(`HTTP ${status}`, "http-status", status)), new Error("unexpected implementation error"),
+	]) {
+		const h = harness({ fetchPage: async () => { throw failure; } });
+		await assert.rejects(h.invoke("web_fetch", { url_or_ref: "https://example.com/unmapped" }), (error) => error === failure);
+		assert.equal(h.calls.length, 0);
+	}
+});
+
+test("live fallback inherits session settings but explicit live mode starts a fresh session", async () => {
+	const h = harness({ flags: { "web-search-context": true }, fetchPage: async () => { throw new HttpFetchError("timeout", "transport"); } });
+	h.setBranch([user("user", "private context")]);
+	const search = await h.invoke("web_search", { query: "test", context_size: "high", domains: ["example.com"], user_location: { country: "US" }, include_context: false });
+	const fetched = await h.invoke("web_fetch", { url_or_ref: "https://example.com/unmapped", search_session: session(search) });
+	assert.equal(session(fetched), session(search));
+	assert.equal(h.calls[1]!.body.id, h.calls[0]!.body.id);
+	assert.deepEqual(h.calls[1]!.body.settings, h.calls[0]!.body.settings);
+	assert.equal(typeof h.calls[1]!.body.input, "string");
+	const cached = await h.invoke("web_search", { query: "cached", mode: "cached" });
+	const live = await h.invoke("web_fetch", { url_or_ref: "https://example.com/page", mode: "live" });
+	assert.notEqual(session(live), session(cached));
+	assert.equal(h.calls[3]!.body.settings.external_web_access, true);
+	assert.notEqual(h.calls[3]!.body.id, h.calls[2]!.body.id);
+});
+
+test("failed fallback retains both local and Codex errors and does not persist a failed session", async () => {
+	const h = harness({ persistCustom: true, fetch: () => new Response("service unavailable", { status: 503 }), fetchPage: async () => { throw new HttpFetchError("Direct fetch timed out.", "transport"); } });
+	await assert.rejects(h.invoke("web_fetch", { url_or_ref: "https://example.com/unmapped" }), (error) => {
+		assert.ok(error instanceof DirectSearchError);
+		assert.equal(error.kind, "http-status"); assert.equal(error.status, 503);
+		assert.match(error.message, /503/); assert.match(error.message, /Local HTTP fetch also failed: Direct fetch timed out/);
+		return true;
+	});
+	assert.equal(h.calls.length, 3); assert.equal(h.getBranch().length, 0);
+	const anonymous = harness({ fetchPage: async () => { throw new HttpFetchError("Direct fetch timed out.", "transport"); } });
+	anonymous.setModels([]);
+	await assert.rejects(anonymous.invoke("web_fetch", { url_or_ref: "https://example.com/unmapped" }), (error) => error instanceof DirectSearchError && error.kind === "configuration" && /not registered.*Local HTTP fetch also failed: Direct fetch timed out/.test(error.message));
+	assert.equal(anonymous.calls.length, 0);
+	const loggedOut = harness({ fetchPage: async () => { throw new HttpFetchError("Direct fetch timed out.", "transport"); } });
+	loggedOut.ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: undefined, headers: {} });
+	await assert.rejects(loggedOut.invoke("web_fetch", { url_or_ref: "https://example.com/unmapped" }), (error) => error instanceof DirectSearchError && error.kind === "authentication" && /not logged in.*Local HTTP fetch also failed: Direct fetch timed out/.test(error.message));
+	assert.equal(loggedOut.calls.length, 0);
+});
+
+test("a failed mapped Codex request is not attempted again after the local fetch fails", async () => {
+	let localCalls = 0;
+	const h = harness({ fetch: (_call, index) => index === 0 ? Response.json(result()) : new Response("unavailable", { status: 503 }), fetchPage: async () => { localCalls++; throw new HttpFetchError("Direct fetch timed out.", "transport"); } });
+	const search = await h.invoke("web_search", { query: "test" });
+	await assert.rejects(h.invoke("web_fetch", { url_or_ref: "https://example.com/page", search_session: session(search) }), /503.*Local HTTP fetch also failed: Direct fetch timed out/);
+	assert.equal(h.calls.length, 4); assert.equal(localCalls, 1);
+});
+
+test("cancellation and branch changes during local failures never start a Codex fallback", async () => {
+	const controller = new AbortController();
+	const cancelled = harness({ fetchPage: async () => { controller.abort(new Error("cancel local fetch")); throw new HttpFetchError("timeout", "transport"); } });
+	await assert.rejects(cancelled.invoke("web_fetch", { url_or_ref: "https://example.com/unmapped" }, controller.signal), /cancel local fetch/);
+	assert.equal(cancelled.calls.length, 0);
+	const changed = harness({ fetchPage: async () => { await changed.emit("session_tree"); throw new HttpFetchError("timeout", "transport"); } });
+	await assert.rejects(changed.invoke("web_fetch", { url_or_ref: "https://example.com/unmapped" }), /session changed/);
+	assert.equal(changed.calls.length, 0);
+});
+
+test("a safety refusal from the new Codex fallback is terminal", async () => {
+	let localCalls = 0;
+	const h = harness({ persistCustom: true, fetch: () => Response.json({ output: "URL https://example.com/unmapped is not safe to open (non-retryable error)", results: [] }), fetchPage: async () => { localCalls++; throw new HttpFetchError("timeout", "transport"); } });
+	await assert.rejects(h.invoke("web_fetch", { url_or_ref: "https://example.com/unmapped" }), (error) => error instanceof DirectSearchError && error.kind === "unsafe-url" && /not safe/.test(error.message));
+	assert.equal(h.calls.length, 1); assert.equal(localCalls, 1); assert.equal(h.getBranch().length, 0);
 });
 
 test("cached/indexed modes and inherited settings never use the HTTP fallback", async () => {

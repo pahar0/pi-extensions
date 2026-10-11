@@ -97,7 +97,11 @@ Remote image URLs are preserved as metadata, **never downloaded automatically**.
 
 ## Local fetching, limits, and retries
 
-Local fetching validates HTTP(S) URLs, rejects credentials and unsafe ports, rejects private/local/reserved DNS answers, pins the connection to a validated address, and revalidates every redirect. Private addresses and binary content remain blocked. Responses are capped at 5 MiB **after decompression**; stream errors and oversized bodies tear down the request/decompressor together.
+Local fetching validates HTTP(S) URLs, rejects credentials and unsafe ports, rejects private/local/reserved DNS answers, pins the connection to a validated address, and revalidates every redirect. Local responses containing binary content remain blocked. Responses are capped at 5 MiB **after decompression**; stream errors and oversized bodies tear down the request/decompressor together.
+
+In live mode, `web_fetch` and `web_find` can fall back to Codex after local transport/timeouts, unsupported content, size-limit failures, or HTTP 403/408/5xx responses—even when the URL has no earlier search reference. The fallback reuses the selected session and its settings, or creates a new live session using the configured model/context preferences. Codex authentication is required for this fallback, but successful local fetching remains usable without login. URL/DNS safety refusals, cancellation, and branch changes never trigger it; HTTP 401/404/429 and unexpected implementation errors are not fallback triggers. Cached/indexed modes remain Codex-only.
+
+Each route is attempted at most once per navigation, including its existing bounded retries: a failed Codex operation is not repeated after local HTTP also fails. If both routes fail, the final error retains both causes.
 
 Extracted HTML retains readable public links. Pages are cached in memory for two minutes, up to 16 pages and 8 MiB of text. `refresh: true` bypasses the local cache; it does not bypass mode or URL restrictions. The cache is cleared on branch/session changes.
 
@@ -112,6 +116,8 @@ Text budgets apply to both Codex and local results:
 | long | 2,000 | 51,200 | 10,000 |
 
 Truncation/file notices may add a small amount of text beyond these content budgets. When text is truncated, the complete formatted output is saved in `full_output_path` when possible. Structured sources/raw metadata and image data have separate bounded budgets; they are not part of the displayed-text budget.
+
+Codex internal-error messages extract the actual numbered error body or meaningful structured details, rather than reporting rendering metadata such as `Total lines: 1`. Details remain bounded; when no useful reason is returned, the error stays generic. Unsupported screenshot reasons are recognized even when the result snippet contains only metadata.
 
 Codex response bodies are capped at 6 MiB. Server errors, transport failures, and genuine internal errors retry at most twice with exponential backoff/jitter and stable session IDs. Retry-After is honored for retryable errors; waits over ten seconds are surfaced instead of sleeping indefinitely or retrying early. HTTP 429/401, malformed responses, URL safety refusals, and unsupported media operations are not blindly retried. Each attempt has a 45-second timeout, and the complete retry operation has a 90-second deadline. A backend safety refusal never falls back to local fetching.
 

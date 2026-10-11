@@ -201,6 +201,30 @@ function firstString(record: Record<string, unknown>, keys: string[], maxChars?:
 	return undefined;
 }
 
+function cleanCodexErrorReason(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const lines = value.slice(0, MAX_ERROR_BODY_CHARS * 4).split(/\r?\n/)
+		.map((line) => line.replace(/^\s*L\d+:\s*/, "").replace(/^\s*Internal Error\b(?:\s*\([^)]*\))?\s*[:.-]?\s*/i, "").trim())
+		.filter((line) => line && !/^(?:Total lines:\s*\d+\b|Source:|Content type:|Crawled:|Published:|\[wordlim\b|【|cite)/i.test(line));
+	return cleanText(lines.join("\n"), MAX_ERROR_BODY_CHARS);
+}
+
+function codexErrorReason(response: CodexSearchResponse): string | undefined {
+	// Result snippets can contain only rendering metadata. Prefer the actual
+	// numbered error body, then meaningful structured fields or unnumbered text.
+	const numbered = response.output.slice(0, MAX_ERROR_BODY_CHARS * 4).split(/\r?\n/).filter((line) => /^\s*L\d+:/.test(line));
+	const bodyReason = cleanCodexErrorReason(numbered.join("\n"));
+	if (bodyReason) return bodyReason;
+	for (const result of (response.results ?? []).slice(0, 100)) {
+		if (!isRecord(result)) continue;
+		for (const key of ["snippet", "description", "text", "content"]) {
+			const reason = cleanCodexErrorReason(result[key]);
+			if (reason) return reason;
+		}
+	}
+	return cleanCodexErrorReason(response.output);
+}
+
 function detectCodexLogicalError(
 	response: CodexSearchResponse,
 ): { kind: DirectSearchErrorKind; message: string } | undefined {
@@ -222,7 +246,7 @@ function detectCodexLogicalError(
 	const onlyInternalResults =
 		resultTitles.length > 0 && resultTitles.every((title) => /^Internal Error$/i.test(title));
 	if (onlyInternalResults || (output && /^Internal Error\b/i.test(output) && !response.results?.length)) {
-		const reason = (response.results ?? []).filter(isRecord).map((result) => firstString(result, ["snippet", "description"], 500)).find(Boolean);
+		const reason = codexErrorReason(response);
 		const unsupported = /Unable to resolve screenshot call|screenshot is not supported|unsupported (?:command|operation)/i.test(reason ?? output ?? "");
 		return {
 			kind: unsupported ? "unsupported-operation" : "internal-error",
@@ -860,6 +884,19 @@ function compactError(error: unknown): string {
 	return String(error).replace(/\s+/g, " ").trim().slice(0, 1_000);
 }
 
+function mayFallbackToCodex(error: HttpFetchError): boolean {
+	return ["transport", "unsupported-content", "too-large"].includes(error.kind) ||
+		(error.kind === "http-status" && error.status !== undefined &&
+			(error.status === 403 || error.status === 408 || (error.status >= 500 && error.status <= 599)));
+}
+
+function combinedNavigationError(remoteError: unknown, localError: HttpFetchError): Error {
+	const message = `${compactError(remoteError)} Local HTTP fetch also failed: ${compactError(localError)}`;
+	return remoteError instanceof DirectSearchError
+		? new DirectSearchError(message, remoteError.kind, remoteError.status, remoteError.retryAfterMs)
+		: new Error(message, { cause: remoteError });
+}
+
 export function formatWebErrorForDisplay(message: string, target?: string): string {
 	const compact = cleanText(message, 500)?.replace(/^Error:\s*/i, "") ?? "Unknown error";
 	const statusMatch = compact.match(/^Direct fetch returned HTTP (\d+)(?:\s+(.+?))?\s+for\s+https?:\/\/\S+/i);
@@ -1304,10 +1341,14 @@ export default function codexWebSearchExtension(pi: ExtensionAPI, dependencies: 
 			return performNavigation(ctx, remoteSession, mappedUrlReference(session, target) ?? target, responseLength, signal, line, pattern);
 		}
 		const exactRef = mappedUrlReference(session, target);
+		let attemptedCodex = false;
+		let codexFailure: unknown;
 		if (exactRef && session && !isRawOrApiUrl(target)) {
+			attemptedCodex = true;
 			try { return await performNavigation(ctx, session, exactRef, responseLength, signal, line, pattern); }
 			catch (error) {
 				if (generation !== navigationGeneration || signal?.aborted || (error instanceof DirectSearchError && error.kind === "unsafe-url")) throw error;
+				codexFailure = error;
 			}
 		}
 		try {
@@ -1315,11 +1356,19 @@ export default function codexWebSearchExtension(pi: ExtensionAPI, dependencies: 
 			if (generation !== navigationGeneration) throw new Error("The web-search session changed while fetching this page.");
 			return { ...(pattern === undefined ? directPageResult(page, session, line) : directFindResult(page, pattern, session)), cached, generation: navigationGeneration };
 		} catch (error) {
-			if (signal?.aborted) throw error;
-			const mayFallback = error instanceof HttpFetchError && ["transport", "unsupported-content", "too-large"].includes(error.kind);
-			const aliasRef = mayFallback ? mappedUrlReference(session, target, true) : undefined;
-			if (aliasRef && session) return performNavigation(ctx, session, aliasRef, responseLength, signal, line, pattern);
-			throw error;
+			signal?.throwIfAborted();
+			if (generation !== navigationGeneration) throw new Error("The web-search session changed while fetching this page.");
+			if (!(error instanceof HttpFetchError) || !mayFallbackToCodex(error)) throw error;
+			// Each route gets at most one operation (including its own retries).
+			// Never repeat a failed Codex operation after trying local HTTP.
+			if (attemptedCodex) throw combinedNavigationError(codexFailure, error);
+			try {
+				const remoteSession = session ?? createSession(ctx, { mode: "live" });
+				return await performNavigation(ctx, remoteSession, mappedUrlReference(session, target, true) ?? target, responseLength, signal, line, pattern);
+			} catch (remoteError) {
+				if (generation !== navigationGeneration || signal?.aborted) throw remoteError;
+				throw combinedNavigationError(remoteError, error);
+			}
 		}
 	}
 	async function finishToolResult(operation: Operation, result: OperationResult, responseLength: ResponseLengthValue, requestedTarget?: string): Promise<AgentToolResult<WebToolDetails>> {
@@ -1398,14 +1447,14 @@ export default function codexWebSearchExtension(pi: ExtensionAPI, dependencies: 
 	});
 	pi.registerTool({
 		...common, name: "web_fetch", label: "Web Fetch", parameters: WebFetchParams, renderCall: callRenderer("web_fetch"),
-		description: "Open a public URL or search reference. References use their Codex session; standalone live URLs use a bounded, DNS-pinned, redirect-validated HTTP fetch with readable HTML and zero-based line labels. Cached/indexed modes only use Codex. Supports local cache refresh and response-length budgets; full truncated output is saved to a file.",
+		description: "Open a public URL or search reference. References use their Codex session; standalone live URLs first use bounded, DNS-pinned, redirect-validated HTTP fetching, then fall back to Codex on eligible failures even without a prior search. URL safety refusals never trigger fallback. Cached/indexed modes only use Codex. Supports zero-based line labels, local cache refresh, and response-length budgets; full truncated output is saved to a file.",
 		promptSnippet: "Open a search result or public URL and extract readable page content",
 		prepareArguments: (args) => prepareUrlArguments(args) as WebFetchInput,
 		async execute(_id, params, signal, _onUpdate, ctx) { return finishToolResult("fetch", await navigate(ctx, params, signal), params.response_length ?? "medium", params.url_or_ref); },
 	});
 	pi.registerTool({
 		...common, name: "web_find", label: "Web Find", parameters: WebFindParams, renderCall: callRenderer("web_find"),
-		description: "Find literal text in a public page or search reference. Uses the selected Codex session or the safe local HTTP page cache. Local matches have zero-based line labels matching web_fetch's line parameter. Cached/indexed modes never use local fetching. Long output is truncated and saved to a file.",
+		description: "Find literal text in a public page or search reference. Uses the selected Codex session or safe local HTTP fetching/cache, with a Codex fallback on eligible live-mode failures even without a prior search. URL safety refusals never trigger fallback. Local matches have zero-based line labels matching web_fetch's line parameter. Cached/indexed modes never use local fetching. Long output is truncated and saved to a file.",
 		promptSnippet: "Find text within a public page or prior search result",
 		prepareArguments: (args) => prepareUrlArguments(args) as WebFindInput,
 		async execute(_id, params, signal, _onUpdate, ctx) { return finishToolResult("find", await navigate(ctx, params, signal), params.response_length ?? "medium", params.url_or_ref); },
