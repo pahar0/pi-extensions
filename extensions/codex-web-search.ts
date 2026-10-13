@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from "node:http";
+import { request as httpRequest, STATUS_CODES, type IncomingHttpHeaders, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { LookupFunction } from "node:net";
 import { tmpdir } from "node:os";
@@ -151,17 +151,21 @@ interface WebToolDetails {
 	fullOutputPath?: string;
 }
 
-type DirectSearchErrorKind = "unsafe-url" | "internal-error" | "http-status" | "transport" | "authentication" | "configuration" | "invalid-response" | "too-large" | "unsupported-operation";
+type DirectSearchErrorKind = "unsafe-url" | "internal-error" | "http-status" | "source-http-status" | "transport" | "authentication" | "configuration" | "invalid-response" | "too-large" | "unsupported-operation";
 type HttpFetchErrorKind = "unsafe-url" | "http-status" | "too-large" | "unsupported-content" | "transport";
 
 export class DirectSearchError extends Error {
 	readonly kind: DirectSearchErrorKind;
 	readonly status?: number;
 	readonly retryAfterMs?: number;
-	constructor(message: string, kind: DirectSearchErrorKind = "authentication", status?: number, retryAfterMs?: number) {
-		super(message); this.name = "DirectSearchError"; this.kind = kind; this.status = status; this.retryAfterMs = retryAfterMs;
+	readonly sourceUrl?: string;
+	constructor(message: string, kind: DirectSearchErrorKind = "authentication", status?: number, retryAfterMs?: number, sourceUrl?: string) {
+		super(message); this.name = "DirectSearchError"; this.kind = kind; this.status = status; this.retryAfterMs = retryAfterMs; this.sourceUrl = sourceUrl;
 	}
-	get retryable(): boolean { return this.kind === "transport" || this.kind === "internal-error" || (this.kind === "http-status" && this.status !== undefined && this.status >= 500 && this.status <= 599); }
+	get retryable(): boolean {
+		return this.kind === "transport" || this.kind === "internal-error" ||
+			((this.kind === "http-status" || this.kind === "source-http-status") && this.status !== undefined && this.status >= 500 && this.status <= 599);
+	}
 }
 
 export class HttpFetchError extends Error {
@@ -225,9 +229,21 @@ function codexErrorReason(response: CodexSearchResponse): string | undefined {
 	return cleanCodexErrorReason(response.output);
 }
 
+function httpStatusLabel(status: number): string {
+	return `${status}${STATUS_CODES[status] ? ` ${STATUS_CODES[status]}` : ""}`;
+}
+
+function sourceHttpFailure(message: string): { url: string; status: number; reason?: string } | undefined {
+	// Match only an explicit fetch failure, not an arbitrary status mentioned in
+	// an internal error or successful document. Older transcripts use this shape too.
+	const match = message.match(/\bFailed to fetch\s+(https?:\/\/\S+):\s*(?:\(([45]\d{2})\)|(?:HTTP\s+)?([45]\d{2})\b)\s*([^\r\n]*)/i);
+	if (!match || !isHttpUrl(match[1])) return undefined;
+	return { url: match[1], status: Number(match[2] ?? match[3]), reason: cleanText(match[4].split(/\s+Local HTTP fetch also failed:/i)[0], 500) };
+}
+
 function detectCodexLogicalError(
 	response: CodexSearchResponse,
-): { kind: DirectSearchErrorKind; message: string } | undefined {
+): { kind: DirectSearchErrorKind; message: string; status?: number; sourceUrl?: string } | undefined {
 	const unsafeMatch = response.output.match(
 		/URL\s+(https?:\/\/\S+)\s+is not safe to open\s+\(non-retryable error\)/i,
 	);
@@ -247,6 +263,12 @@ function detectCodexLogicalError(
 		resultTitles.length > 0 && resultTitles.every((title) => /^Internal Error$/i.test(title));
 	if (onlyInternalResults || (output && /^Internal Error\b/i.test(output) && !response.results?.length)) {
 		const reason = codexErrorReason(response);
+		const sourceFailure = sourceHttpFailure(reason ?? "") ?? sourceHttpFailure(response.output.slice(0, MAX_ERROR_BODY_CHARS * 4));
+		if (sourceFailure) {
+			const detail = sourceFailure.reason && sourceFailure.reason.toLowerCase() !== STATUS_CODES[sourceFailure.status]?.toLowerCase() ? ` ${sourceFailure.reason}` : "";
+			return { kind: "source-http-status", status: sourceFailure.status, sourceUrl: sourceFailure.url,
+				message: `Source fetch failed: HTTP ${httpStatusLabel(sourceFailure.status)} for ${sourceFailure.url}.${detail}` };
+		}
 		const unsupported = /Unable to resolve screenshot call|screenshot is not supported|unsupported (?:command|operation)/i.test(reason ?? output ?? "");
 		return {
 			kind: unsupported ? "unsupported-operation" : "internal-error",
@@ -893,18 +915,26 @@ function mayFallbackToCodex(error: HttpFetchError): boolean {
 function combinedNavigationError(remoteError: unknown, localError: HttpFetchError): Error {
 	const message = `${compactError(remoteError)} Local HTTP fetch also failed: ${compactError(localError)}`;
 	return remoteError instanceof DirectSearchError
-		? new DirectSearchError(message, remoteError.kind, remoteError.status, remoteError.retryAfterMs)
+		? new DirectSearchError(message, remoteError.kind, remoteError.status, remoteError.retryAfterMs, remoteError.sourceUrl)
 		: new Error(message, { cause: remoteError });
 }
 
 export function formatWebErrorForDisplay(message: string, target?: string): string {
-	const compact = cleanText(message, 500)?.replace(/^Error:\s*/i, "") ?? "Unknown error";
-	const statusMatch = compact.match(/^Direct fetch returned HTTP (\d+)(?:\s+(.+?))?\s+for\s+https?:\/\/\S+/i);
-	if (statusMatch) return `HTTP ${statusMatch[1]}${statusMatch[2] ? ` ${statusMatch[2]}` : ""}`;
+	const compact = cleanText(message, MAX_ERROR_BODY_CHARS * 4)?.replace(/^(?:Error|DirectSearchError|HttpFetchError):\s*/i, "") ?? "Unknown error";
+	const statusMatch = compact.match(/^(?:Source fetch failed:|Direct fetch returned)\s*HTTP\s+(\d{3})\b/i);
+	const sourceStatus = statusMatch ? Number(statusMatch[1]) : sourceHttpFailure(compact)?.status;
+	if (sourceStatus !== undefined) {
+		const hint = sourceStatus === 403 ? " — source denied access" : sourceStatus === 401 ? " — source requires authentication" : "";
+		return `HTTP ${httpStatusLabel(sourceStatus)}${hint}`;
+	}
+	const backendStatus = compact.match(/^Codex direct search returned HTTP (\d{3})\b/i);
+	if (backendStatus) return `Codex HTTP ${httpStatusLabel(Number(backendStatus[1]))}`;
 	const contentTypeMatch = compact.match(/^Direct fetch rejected non-text Content-Type\s+(.+?)\s+from\s+https?:\/\/\S+/i);
-	if (contentTypeMatch) return `Non-text content (${contentTypeMatch[1]})`;
-	if (!target) return compact;
-	return compact.replaceAll(target, "this URL");
+	if (contentTypeMatch) return cleanText(`Non-text content (${contentTypeMatch[1]})`, 160)!;
+	// Raw response payloads and repeated URLs are not useful in a collapsed row.
+	let summary = compact.split(/<\?xml\b|<!doctype\b|<html\b|<Error\b/i)[0];
+	if (target) summary = summary.replaceAll(target, "this URL");
+	return cleanText(summary.replace(/https?:\/\/\S+/g, "this URL"), 160) ?? "Web request failed";
 }
 
 function makeSearchSettings(options: SearchOptionsInput): SearchSettings {
@@ -1240,7 +1270,7 @@ export default function codexWebSearchExtension(pi: ExtensionAPI, dependencies: 
 		if (!isRecord(decoded) || typeof decoded.output !== "string") throw new DirectSearchError("Codex direct search response is missing its output field.", "invalid-response");
 		const result = { output: decoded.output, results: Array.isArray(decoded.results) ? decoded.results : undefined };
 		const logicalError = detectCodexLogicalError(result);
-		if (logicalError) throw new DirectSearchError(logicalError.message, logicalError.kind);
+		if (logicalError) throw new DirectSearchError(logicalError.message, logicalError.kind, logicalError.status, undefined, logicalError.sourceUrl);
 		return result;
 	}
 	async function performOperation(options: { ctx: ExtensionContext; session: SearchSession; commands: SearchCommands; input: string; responseLength: ResponseLengthValue; signal?: AbortSignal; settingsUpdate?: SearchSettings; includeContextUpdate?: boolean }): Promise<OperationResult> {
@@ -1410,7 +1440,14 @@ export default function codexWebSearchExtension(pi: ExtensionAPI, dependencies: 
 			if (options.isPartial) return new Text(theme.fg("warning", "Working…"), 0, 0);
 			if (context.isError || !result.details?.backend) {
 				const content = result.content.find((item) => item.type === "text");
-				return new Text(theme.fg("error", `✗ ${content?.type === "text" ? formatWebErrorForDisplay(content.text) : "Web request failed"}`), 0, 0);
+				const args = isRecord(context.args) ? context.args : {};
+				const target = typeof args.url_or_ref === "string" ? args.url_or_ref : undefined;
+				let text = theme.fg("error", `✗ ${content?.type === "text" ? formatWebErrorForDisplay(content.text, target) : "Web request failed"}`);
+				if (options.expanded && content?.type === "text") {
+					const diagnostic = truncateHead(content.text.replace(/\s+Local HTTP fetch also failed:/i, "\nLocal HTTP fetch also failed:"), { maxLines: 30, maxBytes: MAX_ERROR_BODY_CHARS });
+					text += `\n${theme.fg("dim", diagnostic.content)}`;
+				}
+				return new Text(text, 0, 0);
 			}
 			const details = result.details;
 			let text = theme.fg("success", "✓ ") + theme.fg("muted", `${details.operation} complete · ${details.sources.length} sources · ${details.outputLines} lines · ${formatSize(details.outputBytes)}${details.cached ? " · cached" : ""}`);

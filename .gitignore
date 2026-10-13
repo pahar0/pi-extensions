@@ -2,6 +2,11 @@ node_modules/
 *.log
 .DS_Store
 
+# Test suites are local-only
+test/
+tests/
+__tests__/
+
 # Files renamed by resource-manager.ts when disabled
 extensions/**/*.ts.disabled
 skills/**/*.md.disabled
