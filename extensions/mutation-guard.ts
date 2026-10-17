@@ -3,6 +3,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
+	type ToolCallEventResult,
 	createEditToolDefinition,
 	createWriteToolDefinition,
 	isToolCallEventType,
@@ -1006,6 +1007,28 @@ type ApprovalControls = {
 	onExplanationStart?: (usage: Promise<Usage | undefined>) => void;
 };
 
+/** Settle cancelled callers promptly, while still observing the underlying work. */
+function abortableResult<T>(pending: Promise<T>, signal: AbortSignal, cancelled: T): Promise<T> {
+	return new Promise((resolveResult, rejectResult) => {
+		const onAbort = () => {
+			signal.removeEventListener("abort", onAbort);
+			resolveResult(cancelled);
+		};
+		pending.then(
+			(result) => {
+				signal.removeEventListener("abort", onAbort);
+				resolveResult(result);
+			},
+			(error: unknown) => {
+				signal.removeEventListener("abort", onAbort);
+				rejectResult(error);
+			},
+		);
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
 function combineUsage(existing: Usage | undefined, addition: Usage): Usage {
 	if (!existing) return addition;
 
@@ -1118,6 +1141,7 @@ async function generateToolExplanation(
 	toolDescription: string,
 	preview: string,
 	ctx: ExtensionContext,
+	signal: AbortSignal,
 ): Promise<ToolExplanationResult> {
 	const model = ctx.model;
 	if (!model) {
@@ -1154,7 +1178,7 @@ async function generateToolExplanation(
 			],
 		},
 		{
-			signal: ctx.signal,
+			signal,
 			// Explicitly request no thinking/reasoning for this lightweight UI explanation.
 			onPayload: async (payload: unknown) => {
 				if (!payload || typeof payload !== "object") return payload;
@@ -1191,10 +1215,13 @@ async function promptForApproval(
 	toolDescription: string,
 	preview: string,
 	ctx: ExtensionContext,
+	signal: AbortSignal,
 	autoAllow?: ApprovalControls,
 ): Promise<ApprovalResult> {
+	if (signal.aborted) return { action: "abort" };
 	const title = getPromptTitle(action);
 	const baseLines = trimLeadingEmptyLines(preview).replace(/\t/g, "    ").split("\n");
+	let cleanupPrompt = () => {};
 	const customChoice = await ctx.ui.custom<ApprovalResult | undefined>((tui, theme, keybindings, done) => {
 		let active = true;
 		let scrollOffset = 0;
@@ -1254,10 +1281,20 @@ async function promptForApproval(
 			}, 250);
 		}
 
-		function finish(result: ApprovalResult) {
+		function dispose() {
 			active = false;
 			stopLoadingAnimation();
+			signal.removeEventListener("abort", onAbort);
+		}
+
+		function finish(result: ApprovalResult) {
+			if (!active) return;
+			dispose();
 			done(result);
+		}
+
+		function onAbort() {
+			finish({ action: "abort" });
 		}
 
 		function refresh() {
@@ -1375,7 +1412,7 @@ async function promptForApproval(
 				startLoadingAnimation();
 				refresh();
 				if (!explanationPromise) {
-					explanationPromise = generateToolExplanation(action, toolDescription, preview, ctx);
+					explanationPromise = generateToolExplanation(action, toolDescription, preview, ctx, signal);
 					autoAllow?.onExplanationStart?.(
 						explanationPromise.then((result) => result.usage).catch(() => undefined),
 					);
@@ -1399,11 +1436,17 @@ async function promptForApproval(
 			}
 		}
 
+		cleanupPrompt = dispose;
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
+
 		return {
+			dispose,
 			invalidate() {
 				clearRenderCaches();
 			},
 			handleInput(data: string) {
+				if (!active) return;
 				if (matchesKey(data, Key.escape)) {
 					if (editMode) {
 						notes[optionIndex] = editor.getText();
@@ -1563,15 +1606,16 @@ async function promptForApproval(
 				return lines.slice(0, overlayHeightBudget);
 			},
 		};
-	});
+	}).finally(() => cleanupPrompt());
 
 	if (customChoice) return customChoice;
+	if (signal.aborted) return { action: "abort" };
 
 	const selectChoice = await ctx.ui.select(`${title} — ${toolDescription}\n\n${preview}`, [
 		"Allow",
 		"Allow and don't ask again",
 		"Block",
-	]);
+	], { signal });
 	if (selectChoice === "Allow") return { action: "allow" };
 	if (selectChoice === "Allow and don't ask again") {
 		if (autoAllow && !autoAllow.isEnabled()) autoAllow.toggle();
@@ -1582,7 +1626,21 @@ async function promptForApproval(
 
 export default function fileMutationGuardExtension(pi: ExtensionAPI) {
 	let allowEnabled = false;
+	let approvalQueue: Promise<void> = Promise.resolve();
+	let approvalLifecycle = new AbortController();
 	const pendingExplanationUsage = new Map<string, Promise<Usage | undefined>>();
+
+	function enqueueApproval(
+		signal: AbortSignal,
+		run: () => Promise<ToolCallEventResult | undefined>,
+	): Promise<ToolCallEventResult | undefined> {
+		const cancelled = { block: true, reason: "Mutation approval cancelled." };
+		// Keep the slot until the handler finishes, even if its caller aborts.
+		// A rejected approval must not poison later requests.
+		const result = approvalQueue.then(() => signal.aborted ? cancelled : run());
+		approvalQueue = result.then(() => undefined, () => undefined);
+		return abortableResult(result, signal, cancelled);
+	}
 
 	function updateStatus(ctx?: ExtensionContext): void {
 		if (ctx?.mode !== "tui") return;
@@ -1597,10 +1655,13 @@ export default function fileMutationGuardExtension(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		approvalLifecycle.abort();
+		approvalLifecycle = new AbortController();
 		setAllowEnabled(false, ctx);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		approvalLifecycle.abort();
 		pendingExplanationUsage.clear();
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -1645,53 +1706,72 @@ export default function fileMutationGuardExtension(pi: ExtensionAPI) {
 			return undefined;
 		}
 
-		if (allowEnabled && isAcceptEditsAutoAllowed(action)) {
-			return undefined;
-		}
+		// Capture the run's signal now: ctx.signal is a live getter and can change
+		// while this request waits behind another approval.
+		const runSignal = ctx.signal;
+		const signal = runSignal
+			? AbortSignal.any([runSignal, approvalLifecycle.signal])
+			: approvalLifecycle.signal;
 
-		if (ctx.mode !== "tui") {
-			const subject = isFileToolAction(action) ? `${action} ${blockReasonTarget}` : blockReasonTarget;
+		return enqueueApproval(signal, async () => {
+			// Recheck after waiting: an earlier approval may enable accept mode.
+			if (allowEnabled && isAcceptEditsAutoAllowed(action)) return undefined;
+
+			if (ctx.mode !== "tui") {
+				const subject = isFileToolAction(action) ? `${action} ${blockReasonTarget}` : blockReasonTarget;
+				return {
+					block: true,
+					reason: `${subject} blocked: confirmation requires TUI mode. Do not attempt another mutation method. Ask the user why it was blocked.`,
+				};
+			}
+
+			// Serialize previews too, so parallel calls cannot replace an active
+			// custom dialog or arrive out of order after asynchronous preview work.
+			const preview = await buildPreview(action, input, ctx);
+			if (signal.aborted) return { block: true, reason: "Mutation approval cancelled." };
+			if (allowEnabled && isAcceptEditsAutoAllowed(action)) return undefined;
+
+			const toolDescription = getToolDescription(action, input);
+			const choice = await promptForApproval(action, toolDescription, preview, ctx, signal, {
+				isEnabled: () => allowEnabled,
+				toggle: () => setAllowEnabled(!allowEnabled, ctx),
+				onExplanationStart: (usage) => pendingExplanationUsage.set(
+					event.toolCallId, abortableResult(usage, signal, undefined),
+				),
+			});
+			if (signal.aborted) return { block: true, reason: "Mutation approval cancelled." };
+
+			if (choice.action === "allow") {
+				if (choice.note) {
+					pi.sendMessage(
+						{
+							customType: "mutation-guard-note",
+							content: choice.note,
+							display: true,
+						},
+						{ deliverAs: "steer" },
+					);
+				}
+				return undefined;
+			}
+
+			const blockedSubject = isFileToolAction(action) ? `${action} ${blockReasonTarget}` : blockReasonTarget;
+			const blockedMessage = choice.note?.trim() ?? "";
+			if (choice.action === "abort") {
+				// Cancel siblings before releasing the queue, even without a run signal.
+				approvalLifecycle.abort();
+				approvalLifecycle = new AbortController();
+				ctx.abort();
+				return { block: true, reason: `Blocked by user: ${blockedSubject}` };
+			}
 			return {
 				block: true,
-				reason: `${subject} blocked: confirmation requires TUI mode. Do not attempt another mutation method. Ask the user why it was blocked.`,
+				reason:
+					blockedMessage.length > 0
+						? `Blocked this specific tool call for ${blockedSubject}. Adjust it according to the user's note and try again if appropriate. User note: ${blockedMessage}`
+						: `Blocked by user: ${blockedSubject}`,
 			};
-		}
-
-		const preview = await buildPreview(action, input, ctx);
-		const toolDescription = getToolDescription(action, input);
-		const choice = await promptForApproval(action, toolDescription, preview, ctx, {
-			isEnabled: () => allowEnabled,
-			toggle: () => setAllowEnabled(!allowEnabled, ctx),
-			onExplanationStart: (usage) => pendingExplanationUsage.set(event.toolCallId, usage),
 		});
-
-		if (choice.action === "allow") {
-			if (choice.note) {
-				pi.sendMessage(
-					{
-						customType: "mutation-guard-note",
-						content: choice.note,
-						display: true,
-					},
-					{ deliverAs: "steer" },
-				);
-			}
-			return undefined;
-		}
-
-		const blockedSubject = isFileToolAction(action) ? `${action} ${blockReasonTarget}` : blockReasonTarget;
-		const blockedMessage = choice.note?.trim() ?? "";
-		if (choice.action === "abort") {
-			ctx.abort();
-			return undefined;
-		}
-		return {
-			block: true,
-			reason:
-				blockedMessage.length > 0
-					? `Blocked this specific tool call for ${blockedSubject}. Adjust it according to the user's note and try again if appropriate. User note: ${blockedMessage}`
-					: `Blocked by user: ${blockedSubject}`,
-		};
 	});
 
 	pi.on("tool_result", async (event) => {
