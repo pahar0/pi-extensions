@@ -26,10 +26,6 @@ Pi loads the extensions declared by the package manifest. If Pi is already runni
 | `status-footer`           | Replaces the footer with cwd, usage, context, model, thinking, and extension status info.               |
 | `transcribe`              | Adds local speech-to-text dictation, a live recording meter, and `/transcribe` settings.                |
 
-### Codex web tools
-
-See [Codex web tools](docs/codex-web-search.md) for access modes, batching, optional conversation context, structured Codemode results, safety limits, and experimental media support. Context sharing is off by default; start Pi with `--web-search-context` to opt in.
-
 ### Development
 
 Run `npm run check` for TypeScript validation and `npm test` for the regression suites.
