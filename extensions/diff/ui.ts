@@ -1,16 +1,17 @@
 import type { KeybindingsManager, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { basename } from "node:path";
 import {
   CURSOR_MARKER, Editor, Key, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi,
   type Component, type Focusable, type TUI, type TuiMouseEvent, type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { collectSnapshot, loadFileDiff, prepareReview } from "./git.ts";
+import { collectReview, collectSnapshot, loadFileDiff, prepareReview } from "./git.ts";
 import {
-  annotationLabel, makeAnnotation, MAX_NOTE_LENGTH, MAX_NOTES,
-  type Annotation, type DiffRow, type FileDiff, type Snapshot,
+  annotationLabel, fileKey, isWorkspace, makeAnnotation, makeRepositoryNote, MAX_NOTE_LENGTH, MAX_NOTES, reviewSources, sourceForFile,
+  type Annotation, type DiffRow, type FileDiff, type ReviewSnapshot,
 } from "./model.ts";
 
 export interface ReviewScreenOptions {
-  snapshot: Snapshot;
+  snapshot: ReviewSnapshot;
   annotations: Annotation[];
   onChange: (annotations: Annotation[]) => void;
   onDone: (prompt: string | undefined) => void;
@@ -21,6 +22,7 @@ export interface ReviewScreenOptions {
 
 type Mode = "diff" | "notes" | "editor";
 type DisplayRow = { index: number } | { text: string; noteId?: string };
+type SidebarRow = { index: number; heading?: string };
 type SourceRow = Extract<DiffRow, { kind: "line" }>;
 
 /** Escape source controls rather than allowing repository text to emit terminal commands. */
@@ -53,7 +55,7 @@ const FILE_STATUS_COLORS: Readonly<Record<string, ThemeColor>> = {
 };
 
 export class DiffReviewScreen implements Component, Focusable {
-  private snapshot: Snapshot;
+  private snapshot: ReviewSnapshot;
   private annotations: Annotation[];
   private mode: Mode = "diff";
   private editorReturn: Mode = "diff";
@@ -85,6 +87,9 @@ export class DiffReviewScreen implements Component, Focusable {
   private fileAbort?: AbortController;
   private bodyHeight = 15;
   private lastSidebarWidth = 0;
+  private sidebarScroll = 0;
+  private sidebarCache?: { snapshot: ReviewSnapshot; rows: SidebarRow[] };
+  private lastSidebarRows: SidebarRow[] = [];
   private lastDisplayRows: DisplayRow[] = [];
   readonly ready: Promise<void>;
   private tui: TUI;
@@ -171,11 +176,12 @@ export class DiffReviewScreen implements Component, Focusable {
     this.status = "";
     this.renderSoon();
     try {
-      const file = this.cache.get(changed.path) ?? await (this.options.loadFile ?? loadFileDiff)(this.snapshot, changed.path, fileAbort.signal);
+      const key = fileKey(changed);
+      const file = this.cache.get(key) ?? await (this.options.loadFile ?? loadFileDiff)(this.snapshot, key, fileAbort.signal);
       if (this.finished || generation !== this.loadGeneration) return;
       this.file = file;
-      this.cache.delete(changed.path);
-      this.cache.set(changed.path, file);
+      this.cache.delete(key);
+      this.cache.set(key, file);
       while (this.cache.size > 8) this.cache.delete(this.cache.keys().next().value!);
       this.cursor = Math.max(0, file.rows.findIndex((row) => row.kind === "line"));
     } catch (error) {
@@ -210,6 +216,16 @@ export class DiffReviewScreen implements Component, Focusable {
     } else this.status = "Choose a source line first.";
   }
 
+  private currentRepository(): string | undefined {
+    const note = this.mode === "notes" ? this.annotations[this.noteIndex] : undefined;
+    if (note?.repository) return note.repository;
+    if (note?.path) return sourceForFile(this.snapshot, { repository: note.repository, path: note.path }).root;
+    const selected = this.snapshot.files[this.fileIndex];
+    if (selected) return sourceForFile(this.snapshot, selected).root;
+    const roots = [...new Set(reviewSources(this.snapshot).map((source) => source.root))];
+    return roots.length === 1 ? roots[0] : undefined;
+  }
+
   private beginComment(scope: Annotation["scope"]): void {
     try {
       if (this.annotations.length >= MAX_NOTES) throw new Error(`At most ${MAX_NOTES} notes per review. Submit or delete some first.`);
@@ -220,8 +236,12 @@ export class DiffReviewScreen implements Component, Focusable {
         if (first?.kind !== "line" || last?.kind !== "line") throw new Error("Choose source lines to annotate.");
         this.focus = "diff";
       }
-      this.draft = makeAnnotation(this.snapshot, scope, this.file, side, this.rangeStart ?? this.cursor, this.cursor);
-      this.editorReturn = "diff";
+      if (scope === "review") {
+        const repository = this.currentRepository();
+        if (!repository) throw new Error("Select a file in the intended repository before adding a diff note.");
+        this.draft = makeRepositoryNote(this.snapshot, repository);
+      } else this.draft = makeAnnotation(this.snapshot, scope, this.file, side, this.rangeStart ?? this.cursor, this.cursor);
+      this.editorReturn = this.mode === "notes" ? "notes" : "diff";
       this.editor.setText("");
       this.status = "";
       this.setMode("editor");
@@ -232,10 +252,17 @@ export class DiffReviewScreen implements Component, Focusable {
   private editComment(): void {
     const note = this.annotations[this.noteIndex];
     if (!note) return;
-    this.draft = { ...note };
-    this.editorReturn = "notes";
-    this.editor.setText(note.text);
-    this.setMode("editor");
+    try {
+      if (note.scope === "review" && !note.repository) {
+        const repository = this.currentRepository();
+        if (!repository) throw new Error("Select a file in the intended repository, then edit this note.");
+        this.draft = { ...makeRepositoryNote(this.snapshot, repository), id: note.id, text: note.text };
+        this.status = `Saving assigns this older note to ${JSON.stringify(repository)}.`;
+      } else { this.draft = { ...note }; this.status = ""; }
+      this.editorReturn = "notes";
+      this.editor.setText(note.text);
+      this.setMode("editor");
+    } catch (error) { this.status = (error as Error).message; this.renderSoon(); }
   }
 
   private saveComment(submittedText?: string): void {
@@ -265,18 +292,18 @@ export class DiffReviewScreen implements Component, Focusable {
     this.status = "Refreshing…";
     this.renderSoon();
     try {
-      const path = this.file?.path;
-      this.snapshot = await (this.options.collect ?? collectSnapshot)(this.snapshot.target, this.abort.signal);
+      const key = this.file ? fileKey(this.file) : undefined;
+      this.snapshot = await collectReview(reviewSources(this.snapshot).map((source) => source.target), this.abort.signal, this.options.collect ?? collectSnapshot);
       if (this.finished) return;
       this.cache.clear();
-      await this.selectFile(Math.max(0, this.snapshot.files.findIndex((file) => file.path === path)));
+      await this.selectFile(Math.max(0, this.snapshot.files.findIndex((file) => fileKey(file) === key)));
       this.status = "Refreshed. Existing notes keep their original anchors; submission checks for stale locations.";
     } catch (error) { if (!this.finished) this.status = (error as Error).message; }
     finally { this.busy = false; this.renderSoon(); }
   }
 
   private async submit(): Promise<void> {
-    if (!this.annotations.length) { this.status = "Add a comment with c, a file note with f, or a diff note with n first."; this.renderSoon(); return; }
+    if (!this.annotations.length) { this.status = "Add a comment with c, a file note with f, or a repository note with n first."; this.renderSoon(); return; }
     this.busy = true;
     this.status = "Checking the current files and annotation anchors…";
     this.renderSoon();
@@ -388,7 +415,8 @@ export class DiffReviewScreen implements Component, Focusable {
         } else { this.deletePending = id; this.status = "Press d again to delete this note; move or Escape to cancel."; }
       }
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
-      this.focus = this.lastSidebarWidth > 0 && this.focus === "diff" ? "files" : "diff";
+      this.focus = this.focus === "diff" ? "files" : "diff";
+      if (this.focus === "files") this.sidebar = true;
       this.rangeStart = undefined;
     } else if (matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
       this.scrollHorizontal(matchesKey(data, Key.left) ? -12 : 12);
@@ -413,11 +441,12 @@ export class DiffReviewScreen implements Component, Focusable {
     if (!file) return [];
     if (this.displayCache?.file === file && this.displayCache.width === width) return this.displayCache.rows;
     const result: DisplayRow[] = [];
-    const notes = this.annotations.filter((note) => note.path === file.path);
+    const notes = this.annotations.filter((note) => note.path === file.path && note.repository === file.repository);
+    const base = sourceForFile(this.snapshot, file).base;
     const anchored = new Map<string, Annotation[]>();
     const used = new Set<string>();
     const addNote = (note: Annotation) => {
-      const stale = note.fingerprint !== file.fingerprint || note.base !== this.snapshot.base;
+      const stale = note.fingerprint !== file.fingerprint || note.base !== base;
       const label = ` 💬 ${stale ? "[stale anchor] " : ""}${note.scope === "file" ? "File: " : ""}${note.text}`;
       for (const line of label.split("\n")) {
         for (const text of wrapTextWithAnsi(safeText(line), Math.max(1, width - 2))) result.push({ text, noteId: note.id });
@@ -461,8 +490,24 @@ export class DiffReviewScreen implements Component, Focusable {
     return selected || range ? this.theme.bg("selectedBg", colored) : colored;
   }
 
+  private sidebarRows(): SidebarRow[] {
+    if (this.sidebarCache?.snapshot === this.snapshot) return this.sidebarCache.rows;
+    const roots = [...new Set(reviewSources(this.snapshot).map((source) => source.root))];
+    const rows: SidebarRow[] = [];
+    let previous: string | undefined;
+    this.snapshot.files.forEach((file, index) => {
+      if (roots.length > 1 && file.repository !== previous) {
+        rows.push({ index, heading: `[${roots.indexOf(file.repository!) + 1}] ${basename(file.repository!) || file.repository}` });
+        previous = file.repository;
+      }
+      rows.push({ index });
+    });
+    this.sidebarCache = { snapshot: this.snapshot, rows };
+    return rows;
+  }
+
   private renderDiff(width: number): string[] {
-    const sidebarWidth = this.sidebar && width >= 100 ? Math.min(30, Math.floor(width * 0.23)) : 0;
+    const sidebarWidth = this.sidebar && (width >= 100 || this.focus === "files") ? Math.min(30, Math.floor(width * 0.23)) : 0;
     this.lastSidebarWidth = sidebarWidth;
     if (!sidebarWidth && this.focus === "files") this.focus = "diff";
     const mainWidth = this.lastMainWidth = width - (sidebarWidth ? sidebarWidth + 1 : 0);
@@ -475,12 +520,17 @@ export class DiffReviewScreen implements Component, Focusable {
     }
     this.scroll = Math.max(0, Math.min(this.scroll, rows.length - this.bodyHeight));
     this.lastDisplayRows = rows.slice(this.scroll, this.scroll + this.bodyHeight);
-    const fileStart = Math.max(0, this.fileIndex - this.bodyHeight + 1);
+    const sidebarRows = this.sidebarRows();
+    const selectedFile = sidebarRows.findIndex((row) => !row.heading && row.index === this.fileIndex);
+    if (selectedFile < this.sidebarScroll) this.sidebarScroll = selectedFile;
+    if (selectedFile >= this.sidebarScroll + this.bodyHeight) this.sidebarScroll = selectedFile - this.bodyHeight + 1;
+    this.sidebarScroll = Math.max(0, Math.min(this.sidebarScroll, sidebarRows.length - this.bodyHeight));
+    this.lastSidebarRows = sidebarRows.slice(this.sidebarScroll, this.sidebarScroll + this.bodyHeight);
     const result: string[] = [];
     for (let y = 0; y < this.bodyHeight; y++) {
       let main = "";
       if (this.loading && y === 0) main = this.theme.fg("muted", "Loading diff…");
-      else if (!this.snapshot.files.length && y === 0) main = "No changes for this path. n adds a general note; a opens saved notes.";
+      else if (!this.snapshot.files.length && y === 0) main = "No changes for this path. n adds a repository note; a opens saved notes.";
       else {
         const item = this.lastDisplayRows[y];
         if (item && "index" in item) {
@@ -490,10 +540,12 @@ export class DiffReviewScreen implements Component, Focusable {
       }
       let side = "";
       if (sidebarWidth) {
-        const file = this.snapshot.files[fileStart + y];
-        if (file) {
-          const count = this.annotations.filter((note) => note.path === file.path).length;
-          const selected = fileStart + y === this.fileIndex;
+        const entry = this.lastSidebarRows[y];
+        const file = entry && this.snapshot.files[entry.index];
+        if (entry?.heading) side = this.theme.fg("accent", fit(` ${safeText(entry.heading)}`, sidebarWidth));
+        else if (file) {
+          const count = this.annotations.filter((note) => note.path === file.path && note.repository === file.repository).length;
+          const selected = entry.index === this.fileIndex;
           const marker = this.focus === "files" && selected ? "›" : " ";
           const status = this.theme.fg(FILE_STATUS_COLORS[file.status.charAt(0)] ?? "muted", safeText(file.status));
           const label = `${safeText(file.path)}${count ? ` ●${count}` : ""}`;
@@ -519,8 +571,8 @@ export class DiffReviewScreen implements Component, Focusable {
     this.listScroll = Math.max(0, Math.min(this.listScroll, rows.length - this.bodyHeight));
     const body = rows.slice(this.listScroll, this.listScroll + this.bodyHeight).map((row) => row.index === this.noteIndex
       ? this.theme.bg("selectedBg", fit(row.text, width)) : row.text);
-    if (!rows.length) body.push("No saved notes yet. Escape to return; c comments on a line, n adds a diff note.");
-    return [this.theme.fg("accent", "Saved notes · Enter/e edit · d,d delete · Escape back"), ...body];
+    if (!rows.length) body.push("No saved notes yet.");
+    return [this.theme.fg("accent", "Saved notes"), ...body];
   }
 
   private renderEditor(width: number): string[] {
@@ -555,15 +607,17 @@ export class DiffReviewScreen implements Component, Focusable {
     this.bodyHeight = contentHeight - (this.mode === "diff" ? 0 : 1);
     const file = this.snapshot.files[this.fileIndex];
     const title = this.theme.fg("accent", ` /diff · ${this.annotations.length} note(s) · ${this.snapshot.files.length} file(s)`);
-    const subtitle = this.theme.fg("muted", ` ${safeText(this.snapshot.target)}${file ? ` · ${safeText(file.path)}` : ""}${this.file ? `  +${this.file.added} −${this.file.removed}` : ""}`);
+    const roots = [...new Set(reviewSources(this.snapshot).map((source) => source.root))];
+    const location = isWorkspace(this.snapshot) ? `${roots.length > 1 ? `[${roots.indexOf(file?.repository ?? roots[0]) + 1}] ` : ""}${file?.repository ?? roots[0]}` : this.snapshot.target;
+    const subtitle = this.theme.fg("muted", ` ${safeText(location)}${file ? ` · ${safeText(file.path)}` : ""}${this.file ? `  +${this.file.added} −${this.file.removed}` : ""}`);
     let content: string[];
     if (this.mode === "diff") content = this.renderDiff(width);
     else if (this.mode === "notes") content = this.renderNotes(width);
     else content = this.renderEditor(width);
     while (content.length < contentHeight) content.push("");
     const footer = this.mode === "editor" ? " Enter/Ctrl+S save · Shift+Enter newline · Esc cancel" :
-      this.mode === "diff" ? " Tab focus · c comment · v range · f file note · n diff note · a notes · Ctrl+S send · Esc close" :
-        " ↑↓ navigate · Esc back · Ctrl+S send to Pi";
+      this.mode === "diff" ? " Tab focus · c comment · v range · f file note · n repo note · a notes · Ctrl+S send · Esc close" :
+        " ↑↓ select · Enter/e edit · d,d delete · n repo note · Esc back · Ctrl+S send";
     const status = this.status || (this.rangeStart !== undefined && this.mode === "diff" ? "Range selection active · move, then c to comment" : "Drafts saved in this session branch · Ctrl+S outside the editor sends to Pi.");
     return [title, subtitle, ...content.slice(0, contentHeight), this.theme.fg("muted", safeText(status)), this.theme.fg("dim", footer)]
       .slice(0, height).map((line) => fit(line, width));
@@ -579,8 +633,8 @@ export class DiffReviewScreen implements Component, Focusable {
     const y = event.y - 2;
     if (y < 0 || y >= this.bodyHeight) return { handled: true };
     if (this.lastSidebarWidth && event.x < this.lastSidebarWidth) {
-      const start = Math.max(0, this.fileIndex - this.bodyHeight + 1);
-      if (this.snapshot.files[start + y]) { this.focus = "files"; void this.selectFile(start + y); }
+      const entry = this.lastSidebarRows[y];
+      if (entry) { this.focus = "files"; void this.selectFile(entry.index); }
     } else {
       const item = this.lastDisplayRows[y];
       if (item && "index" in item) {

@@ -2,11 +2,13 @@ import { execFile } from "node:child_process";
 import { lstat, readFile, readlink, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
-  addedFile, buildPrompt, digest, parsePatch,
-  type Annotation, type ChangedFile, type FileDiff, type PreparedReview, type Snapshot,
+  addedFile, buildPrompt, combineSnapshots, digest, fileKey, isWorkspace, MAX_REVIEW_FILES, parsePatch, repositoryReview, reviewNoteRepository, reviewSources, sourceForFile,
+  type Annotation, type ChangedFile, type FileDiff, type PreparedReview, type ReviewSnapshot, type Snapshot,
 } from "./model.ts";
 
-const MAX_FILES = 2_000;
+import { MAX_REVIEW_PATHS } from "./paths.ts";
+
+const MAX_FILES = MAX_REVIEW_FILES;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_PATCH_BYTES = 8 * 1024 * 1024;
 
@@ -119,6 +121,21 @@ export async function collectSnapshot(path: string, signal?: AbortSignal): Promi
   };
 }
 
+export async function collectReview(paths: readonly string[], signal?: AbortSignal, collect = collectSnapshot): Promise<ReviewSnapshot> {
+  if (!paths.length || paths.length > MAX_REVIEW_PATHS) throw new Error(`Review between 1 and ${MAX_REVIEW_PATHS} paths at once.`);
+  const snapshots: Snapshot[] = [];
+  for (let i = 0; i < paths.length; i += 4) {
+    snapshots.push(...await Promise.all(paths.slice(i, i + 4).map(async (path) => {
+      try { return await collect(path, signal); }
+      catch (error) {
+        if (paths.length === 1 || signal?.aborted) throw error;
+        throw new Error(`${JSON.stringify(path)}: ${(error as Error).message}`, { cause: error });
+      }
+    })));
+  }
+  return combineSnapshots(snapshots);
+}
+
 async function workingContent(root: string, path: string): Promise<{ fingerprint: string; text?: string; message?: string }> {
   const fullPath = join(root, path);
   try {
@@ -142,7 +159,13 @@ async function workingContent(root: string, path: string): Promise<{ fingerprint
   }
 }
 
-export async function loadFileDiff(snapshot: Snapshot, path: string, signal?: AbortSignal): Promise<FileDiff> {
+export async function loadFileDiff(snapshot: ReviewSnapshot, path: string, signal?: AbortSignal): Promise<FileDiff> {
+  if (isWorkspace(snapshot)) {
+    const file = snapshot.files.find((file) => fileKey(file) === path);
+    if (!file) throw new Error("File is no longer in this diff. Press r to refresh.");
+    const source = sourceForFile(snapshot, file);
+    return { ...await loadFileDiff(source, file.path, signal), repository: source.root };
+  }
   const file = snapshot.files.find((candidate) => candidate.path === path);
   if (!file) throw new Error("File is no longer in this diff. Press r to refresh.");
   const before = await fileStamp(snapshot.root, path);
@@ -173,21 +196,42 @@ export async function loadFileDiff(snapshot: Snapshot, path: string, signal?: Ab
   return { path, fingerprint: digest(snapshot.base ?? "unborn", path, content.fingerprint, patch), ...parsed };
 }
 
-export async function prepareReview(snapshot: Snapshot, annotations: Annotation[], signal?: AbortSignal): Promise<PreparedReview> {
-  const current = await collectSnapshot(snapshot.target, signal);
-  const fingerprints = new Map<string, string>();
-  const paths = [...new Set(annotations.flatMap((note) => note.path ? [note.path] : []))];
-  for (const path of paths) {
-    if (current.files.some((file) => file.path === path)) {
-      fingerprints.set(path, (await loadFileDiff(current, path, signal)).fingerprint);
-    }
+export async function prepareReview(snapshot: ReviewSnapshot, annotations: Annotation[], signal?: AbortSignal): Promise<PreparedReview> {
+  if (!annotations.length) throw new Error("Add at least one annotation before submitting.");
+  const noteRepositories = new Map(annotations.map((note) => [note.id, note.scope === "review" ? reviewNoteRepository(snapshot, note)
+    : sourceForFile(snapshot, { repository: note.repository, path: note.path! }).root]));
+  const roots = new Set(noteRepositories.values());
+  const sources = reviewSources(snapshot).filter((source) => roots.has(source.root));
+  const selected = combineSnapshots(sources);
+  const current = await collectReview(sources.map((source) => source.target), signal);
+  const scopedReviews = new Map<string, ReviewSnapshot>();
+  for (const root of new Set(noteRepositories.values())) {
+    if (reviewSources(current).some((source) => source.root === root)) scopedReviews.set(root, repositoryReview(current, root));
   }
-  const staleIds = annotations.filter((note) => note.base !== current.base || (note.scope === "review"
-    ? note.fingerprint !== current.id
-    : note.fingerprint !== fingerprints.get(note.path!))).map((note) => note.id);
+  const fingerprints = new Map<string, string>();
+  const requested = new Map<string, { repository: string; path: string }>();
+  for (const note of annotations) {
+    if (!note.path) continue;
+    const file = { repository: sourceForFile(snapshot, { repository: note.repository, path: note.path }).root, path: note.path };
+    requested.set(fileKey(file), file);
+  }
+  for (const file of current.files) {
+    const source = sourceForFile(current, file);
+    const key = fileKey({ repository: source.root, path: file.path });
+    if (requested.has(key)) fingerprints.set(key, (await loadFileDiff(current, fileKey(file), signal)).fingerprint);
+  }
+  const staleIds = annotations.filter((note) => {
+    if (note.scope === "review") {
+      const selected = scopedReviews.get(noteRepositories.get(note.id)!);
+      return !selected || note.fingerprint !== selected.id || ((note.repository !== undefined || !isWorkspace(snapshot)) && note.base !== reviewSources(selected)[0].base);
+    }
+    const root = sourceForFile(snapshot, { repository: note.repository, path: note.path! }).root;
+    const source = reviewSources(current).find((source) => source.root === root);
+    return !source || note.base !== source.base || note.fingerprint !== fingerprints.get(fileKey({ repository: root, path: note.path! }));
+  }).map((note) => note.id);
   return {
     prompt: buildPrompt(snapshot, annotations, staleIds),
     staleIds,
-    treeChanged: current.id !== snapshot.id,
+    treeChanged: current.id !== selected.id,
   };
 }
