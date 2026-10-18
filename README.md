@@ -21,9 +21,7 @@ Pi loads the extensions declared by the package manifest. If Pi is already runni
 | `codex-web-search`        | Adds structured `web_search`, `web_fetch`, `web_find`, and batched `web_run` tools with safe HTTP fallback.                      |
 | `diff`                    | Adds `/diff` to review and annotate Git changes across repositories.                                  |
 | `init`                    | Adds `/init` to survey a repository and create or improve project guidance in `AGENTS.md`.              |
-| `mutation-guard`          | Prompts for approval before file edits, writes, and risky shell mutations.                              |
 | `resource-manager`        | Adds commands for enabling, disabling, and uninstalling custom extensions and skills.                   |
-| `restore-files`           | Tracks file checkpoints and can restore code alongside conversation tree navigation.                   |
 | `continue-agent-turn`     | Continues the current agent turn with `Ctrl+R`, retrying interrupted attempts when necessary.          |
 | `status-footer`           | Replaces the footer with cwd, usage, context, model, thinking, and extension status info.               |
 | `transcribe`              | Adds local speech-to-text dictation, a live recording meter, and `/transcribe` settings.                |

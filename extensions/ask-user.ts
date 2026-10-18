@@ -7,9 +7,10 @@
  * - An always-present "Write my own answer" option
  * - Bounded, width-aware tab navigation with a final review/submit page
  * - Abort-aware custom UI that distinguishes dismissal from cancellation
+ * - Compact result history shows two questions; expand for all questions and descriptions
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
 import {
   Editor,
   type EditorTheme,
@@ -27,6 +28,7 @@ const MAX_QUESTIONS = 10;
 const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 5;
 const MAX_TAB_LABEL_WIDTH = 14;
+const MAX_COLLAPSED_QUESTIONS = 2;
 
 const ASK_USER_PARAMETER_DESCRIPTIONS = {
   optionValue: "Stable machine-readable value returned when this option is selected",
@@ -853,43 +855,75 @@ export default function askUser(pi: ExtensionAPI) {
       return new Text(text, 0, 0);
     },
 
-    renderResult(result, _options, theme, _context) {
+    renderResult(result, { expanded }, theme, _context) {
       const details = result.details as AskUserDetails | undefined;
       if (!details) {
         const first = result.content[0];
         return new Text(first?.type === "text" ? first.text : "", 0, 0);
       }
 
+      const lines: string[] = [];
       if (details.outcome === "aborted") {
-        return new Text(theme.fg("warning", "✗ cancelled"), 0, 0);
-      }
-      if (details.outcome === "no-ui") {
-        return new Text(theme.fg("warning", "✗ UI unavailable"), 0, 0);
-      }
-      if (details.outcome === "dismissed") {
-        return new Text(theme.fg("warning", "✗ dismissed"), 0, 0);
+        lines.push(theme.fg("warning", "✗ cancelled"));
+      } else if (details.outcome === "no-ui") {
+        lines.push(theme.fg("warning", "✗ UI unavailable"));
+      } else if (details.outcome === "dismissed") {
+        lines.push(theme.fg("warning", "✗ dismissed"));
       }
 
-      const questionsById = new Map(
-        details.questions.map((question) => [question.id, question]),
+      const answersById = new Map(
+        details.answers.map((answer) => [answer.id, answer]),
       );
-      const lines = details.answers.map((answer) => {
-        const question = questionsById.get(answer.id);
-        const label = question?.label || answer.id;
-        const prompt = question?.prompt.replace(/\s+/g, " ").trim();
-        const questionLine = `${theme.fg("success", "✓ ")}${theme.fg(
-          "accent",
-          label,
-        )}${prompt ? `: ${theme.fg("text", prompt)}` : ""}`;
+      const visibleQuestions = expanded
+        ? details.questions
+        : details.questions.slice(0, MAX_COLLAPSED_QUESTIONS);
+      for (const question of visibleQuestions) {
+        const answer = answersById.get(question.id);
+        const answeredIndex = selectedOptionIndex(question, answer);
+        const prompt = question.prompt.replace(/\s+/g, " ").trim();
+        lines.push(
+          `${theme.fg("accent", theme.bold(`${question.label}: ${prompt}`))}${
+            answer ? "" : theme.fg("warning", " (unanswered)")
+          }`,
+        );
 
-        const display = answer.wasCustom
-          ? `${theme.fg("muted", "(wrote) ")}${answer.label}`
-          : answer.index
-            ? `${answer.index}. ${answer.label}`
-            : answer.label;
-        return `${questionLine}\n  ${theme.fg("muted", "Answer: ")}${display}`;
-      });
-      return new Text(lines.join("\n"), 0, 0);
+        optionsForQuestion(question).forEach((option, index) => {
+          if (option.isOther && !answer?.wasCustom) return;
+
+          const selected = index === answeredIndex;
+          const optionLabel = option.isOther && answer?.wasCustom
+            ? answer.label
+            : option.label;
+          const label = `${index + 1}. ${optionLabel}`;
+          const styled = selected
+            ? theme.fg("success", theme.bold(`✓ ${label}`))
+            : theme.fg("muted", `  ${label}`);
+          lines.push(`  ${styled}`);
+          if (expanded && option.description) {
+            lines.push(`      ${theme.fg("muted", option.description)}`);
+          }
+        });
+      }
+      const hiddenQuestionCount = details.questions.length - visibleQuestions.length;
+      if (hiddenQuestionCount > 0) {
+        lines.push(
+          theme.fg("muted", `… ${hiddenQuestionCount} more question${hiddenQuestionCount === 1 ? "" : "s"} · `) +
+            keyHint("app.tools.expand", "to show all"),
+        );
+      }
+      const text = new Text(lines.join("\n"), 0, 0);
+      return {
+        render(width: number) {
+          const renderWidth = Math.max(1, width);
+          // A wide grapheme can exceed a one-column viewport even after wrapping.
+          return text.render(renderWidth).map((line) =>
+            truncateToWidth(line, renderWidth, ""),
+          );
+        },
+        invalidate() {
+          text.invalidate();
+        },
+      };
     },
   });
 }

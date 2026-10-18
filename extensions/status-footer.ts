@@ -2,6 +2,7 @@
 import type { Api, Model, Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 
 type ModelLike = Model<Api>;
@@ -9,7 +10,6 @@ type ModelLike = Model<Api>;
 type UsageLike = {
 	input: number;
 	output: number;
-	cacheRead: number;
 	cacheWrite: number;
 	cost: { total: number };
 };
@@ -48,7 +48,27 @@ type FooterContextLike = {
 	getContextUsage: () => { contextWindow?: number; percent: number | null } | null | undefined;
 };
 
+type SubscriptionWindow = {
+	usedPercent: number;
+	windowMinutes?: number;
+	resetsAt?: number;
+};
+
+type CodexUsage = {
+	primary?: SubscriptionWindow;
+	secondary?: SubscriptionWindow;
+	monthly?: SubscriptionWindow;
+};
+
 export default function statusFooter(pi: ExtensionAPI) {
+	let codexUsage: CodexUsage | undefined;
+	let quotaUnavailable = false;
+	let requestFooterRender: (() => void) | undefined;
+	let quotaActive = false;
+	let quotaRequest: AbortController | undefined;
+	let quotaAuthKey: string | undefined;
+	let lastQuotaAttempt = -Infinity;
+	let lastQuotaUpdate = 0;
 
 	function formatTokens(n: number): string {
 		return n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`;
@@ -108,6 +128,199 @@ export default function statusFooter(pi: ExtensionAPI) {
 			return entry.usage;
 		}
 		return undefined;
+	}
+
+	function isUsingSubscription(ctx: FooterContextLike): boolean {
+		return ctx.model !== undefined && (
+			ctx.model.provider === "kimi-coding" ||
+			(ctx.modelRegistry.isUsingOAuth(ctx.model) &&
+				ctx.modelRegistry.getProvider(ctx.model.provider)?.auth.oauth?.isSubscription === true)
+		);
+	}
+
+	function isCodexSubscription(ctx: FooterContextLike): boolean {
+		return ctx.model?.provider === "openai-codex" && isUsingSubscription(ctx);
+	}
+
+	function finiteNumber(value: unknown): number | undefined {
+		if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return undefined;
+		const number = Number(value);
+		return Number.isFinite(number) ? number : undefined;
+	}
+
+	function subscriptionWindow(used: unknown, minutes: unknown, reset: unknown): SubscriptionWindow | undefined {
+		const usedPercent = finiteNumber(used);
+		if (usedPercent === undefined || usedPercent < 0 || usedPercent > 100) return undefined;
+		const windowMinutes = finiteNumber(minutes);
+		const resetsAt = finiteNumber(reset);
+		return {
+			usedPercent,
+			windowMinutes: windowMinutes !== undefined && windowMinutes > 0 ? windowMinutes : undefined,
+			resetsAt: resetsAt !== undefined && resetsAt > 0 ? resetsAt : undefined,
+		};
+	}
+
+	function streamSubscriptionWindow(value: unknown): SubscriptionWindow | undefined {
+		if (!value || typeof value !== "object") return undefined;
+		const window = value as Record<string, unknown>;
+		return subscriptionWindow(window.used_percent, window.window_minutes, window.reset_at);
+	}
+
+	function updateCodexUsage(usage: CodexUsage, authoritative = false) {
+		if (!authoritative && !Object.values(usage).some(Boolean)) return;
+		codexUsage = {
+			...usage,
+			// Response headers/events omit monthly spend controls; only the usage endpoint can clear them.
+			monthly: authoritative ? usage.monthly : usage.monthly ?? codexUsage?.monthly,
+		};
+		quotaUnavailable = authoritative && !Object.values(codexUsage).some(Boolean);
+		lastQuotaUpdate = Date.now();
+		requestFooterRender?.();
+	}
+
+	function resetCodexUsage() {
+		quotaRequest?.abort();
+		quotaRequest = undefined;
+		quotaAuthKey = undefined;
+		lastQuotaAttempt = -Infinity;
+		lastQuotaUpdate = 0;
+		codexUsage = undefined;
+		quotaUnavailable = false;
+		requestFooterRender?.();
+	}
+
+	function hasCurrentCodexUsage(): boolean {
+		return Object.values(codexUsage ?? {}).some((window) => window && (
+			window.resetsAt === undefined || window.resetsAt * 1000 > Date.now()
+		));
+	}
+
+	function usageEndpointWindow(value: unknown): SubscriptionWindow | undefined {
+		if (!value || typeof value !== "object") return undefined;
+		const window = value as Record<string, unknown>;
+		const seconds = finiteNumber(window.limit_window_seconds);
+		return subscriptionWindow(
+			window.used_percent,
+			seconds !== undefined && seconds > 0 ? Math.ceil(seconds / 60) : undefined,
+			window.reset_at,
+		);
+	}
+
+	function record(value: unknown): Record<string, unknown> | undefined {
+		return value && typeof value === "object" && !Array.isArray(value)
+			? value as Record<string, unknown> : undefined;
+	}
+
+	function monthlySubscriptionUsage(value: unknown): SubscriptionWindow | undefined {
+		const limit = record(value);
+		if (!limit) return undefined;
+		const maximum = finiteNumber(limit.limit);
+		if (maximum !== undefined && maximum <= 0) return undefined;
+		const remaining = finiteNumber(limit.remaining_percent);
+		const used = finiteNumber(limit.used);
+		const percent = finiteNumber(limit.used_percent) ?? (
+			remaining !== undefined && remaining >= 0 && remaining <= 100 ? 100 - remaining
+				: maximum !== undefined && used !== undefined && used >= 0 ? (used / maximum) * 100
+				: undefined
+		);
+		return subscriptionWindow(percent, undefined, limit.reset_at ?? limit.resets_at);
+	}
+
+	// Some accounts omit quota headers/events. Resolve current auth through Pi, never auth.json.
+	async function refreshCodexUsage(ctx: ExtensionContext): Promise<void> {
+		if (!quotaActive || ctx.mode !== "tui" || !isCodexSubscription(ctx) || !ctx.model || quotaRequest) return;
+
+		const model = ctx.model;
+		const controller = new AbortController();
+		quotaRequest = controller;
+		const isCurrent = () => !controller.signal.aborted && quotaActive &&
+			quotaRequest === controller && ctx.model === model && isCodexSubscription(ctx);
+		try {
+			const usageBeforeAuth = codexUsage;
+			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+			if (!isCurrent()) return;
+			if (!auth.ok || !auth.apiKey) return;
+			// Do not send credentials for a custom/proxied provider to OpenAI's usage endpoint.
+			const baseUrl = new URL(auth.baseUrl ?? model.baseUrl);
+			if (baseUrl.origin !== "https://chatgpt.com") return;
+
+			const claims = JSON.parse(Buffer.from(auth.apiKey.split(".")[1] ?? "", "base64url").toString("utf8"));
+			const accountId = claims?.["https://api.openai.com/auth"]?.chatgpt_account_id;
+			if (typeof accountId !== "string" || !accountId) return;
+			// Keep only a fingerprint in memory so /login detects a changed account without retaining tokens.
+			const authKey = createHash("sha256").update(auth.apiKey).digest("hex");
+			if (quotaAuthKey !== authKey) {
+				quotaAuthKey = authKey;
+				lastQuotaAttempt = -Infinity;
+				if (codexUsage === usageBeforeAuth) {
+					codexUsage = undefined;
+					quotaUnavailable = false;
+				}
+				requestFooterRender?.();
+			}
+			if (
+				(hasCurrentCodexUsage() && !codexUsage?.monthly && Date.now() - lastQuotaUpdate < 60_000) ||
+				Date.now() - lastQuotaAttempt < 60_000
+			) return;
+			lastQuotaAttempt = Date.now();
+			const previousUsage = codexUsage;
+			const response = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+				headers: {
+					Authorization: `Bearer ${auth.apiKey}`,
+					"ChatGPT-Account-Id": accountId,
+					Accept: "application/json",
+					"User-Agent": "pi-status-footer",
+				},
+				redirect: "error",
+				signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]),
+			});
+			if (!response.ok) {
+				await response.body?.cancel();
+				return;
+			}
+			const data: unknown = await response.json();
+			if (!isCurrent()) return;
+			const currentAuth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+			if (!isCurrent()) return;
+			if (!currentAuth.ok || !currentAuth.apiKey ||
+				createHash("sha256").update(currentAuth.apiKey).digest("hex") !== authKey) {
+				resetCodexUsage();
+				return;
+			}
+			const payload = record(data);
+			if (!payload) return;
+			const windows = record(payload.rate_limit);
+			const primary = usageEndpointWindow(windows?.primary_window);
+			const secondary = usageEndpointWindow(windows?.secondary_window);
+			const monthly = monthlySubscriptionUsage(record(payload.spend_control)?.individual_limit);
+			// A newer stream snapshot wins for rolling windows, but it contains no monthly allowance.
+			if (codexUsage === previousUsage) {
+				updateCodexUsage({ primary, secondary, monthly }, true);
+			} else {
+				updateCodexUsage({ ...codexUsage, monthly }, true);
+			}
+		} catch {
+			// Quota reporting is best-effort; failures must not interrupt the session.
+		} finally {
+			if (quotaRequest === controller) quotaRequest = undefined;
+		}
+	}
+
+	function codexSubscriptionLabel(theme: FooterThemeLike): string {
+		const windows: string[] = [];
+		for (const [name, window] of Object.entries(codexUsage ?? {})) {
+			if (!window || (window.resetsAt !== undefined && window.resetsAt * 1000 <= Date.now())) continue;
+			const minutes = window.windowMinutes;
+			const label = minutes === undefined ? name
+				: minutes % 1440 === 0 ? `${minutes / 1440}d`
+				: minutes % 60 === 0 ? `${minutes / 60}h`
+				: `${minutes}m`;
+			const color = window.usedPercent >= 90 ? "error" : window.usedPercent >= 75 ? "warning" : "dim";
+			windows.push(`${theme.fg("dim", `${label}:`)}${theme.fg(color, `${window.usedPercent.toFixed(1)}%`)}`);
+		}
+		return windows.length > 0
+			? `${theme.fg("dim", "(sub ")}${windows.join(" ")}${theme.fg("dim", ")")}`
+			: theme.fg("dim", quotaUnavailable ? "(sub n/a)" : "(sub ?)");
 	}
 
 	function rightLabel(ctx: FooterContextLike, theme: FooterThemeLike, footerData: FooterDataLike): string {
@@ -175,10 +388,8 @@ export default function statusFooter(pi: ExtensionAPI) {
 	type SessionStats = {
 		totalInput: number;
 		totalOutput: number;
-		totalCacheRead: number;
 		totalCacheWrite: number;
 		totalCost: number;
-		latestCacheHitRate?: number;
 		contextUsage: ReturnType<FooterContextLike["getContextUsage"]>;
 	};
 
@@ -192,34 +403,23 @@ export default function statusFooter(pi: ExtensionAPI) {
 	function calculateSessionStats(ctx: FooterContextLike): SessionStats {
 		let totalInput = 0;
 		let totalOutput = 0;
-		let totalCacheRead = 0;
 		let totalCacheWrite = 0;
 		let totalCost = 0;
-		let latestCacheHitRate: number | undefined;
 
 		for (const entry of ctx.sessionManager.getEntries()) {
 			const usage = getEntryUsage(entry);
 			if (!usage) continue;
 			totalInput += usage.input;
 			totalOutput += usage.output;
-			totalCacheRead += usage.cacheRead;
 			totalCacheWrite += usage.cacheWrite;
 			totalCost += usage.cost.total;
-			if (entry.type === "message" && entry.message?.role === "assistant") {
-				const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-				latestCacheHitRate = promptTokens > 0
-					? (usage.cacheRead / promptTokens) * 100
-					: undefined;
-			}
 		}
 
 		return {
 			totalInput,
 			totalOutput,
-			totalCacheRead,
 			totalCacheWrite,
 			totalCost,
-			latestCacheHitRate,
 			contextUsage: ctx.getContextUsage(),
 		};
 	}
@@ -255,28 +455,19 @@ export default function statusFooter(pi: ExtensionAPI) {
 		const {
 			totalInput,
 			totalOutput,
-			totalCacheRead,
 			totalCacheWrite,
 			totalCost,
-			latestCacheHitRate,
 			contextUsage,
 		} = stats;
 		const parts: string[] = [];
 		if (totalInput) parts.push(`↑${formatTokens(totalInput)}`);
 		if (totalOutput) parts.push(`↓${formatTokens(totalOutput)}`);
-		if (totalCacheRead) parts.push(`R${formatTokens(totalCacheRead)}`);
 		if (totalCacheWrite) parts.push(`W${formatTokens(totalCacheWrite)}`);
-		if ((totalCacheRead || totalCacheWrite) && latestCacheHitRate !== undefined) {
-			parts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
-		}
 
-		const usingSubscription = ctx.model
-			? ctx.model.provider === "kimi-coding" ||
-				(ctx.modelRegistry.isUsingOAuth(ctx.model) &&
-					ctx.modelRegistry.getProvider(ctx.model.provider)?.auth.oauth?.isSubscription === true)
-			: false;
-		if (totalCost || usingSubscription) {
-			parts.push(`$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+		if (isUsingSubscription(ctx)) {
+			parts.push(isCodexSubscription(ctx) ? codexSubscriptionLabel(theme) : theme.fg("dim", "(sub)"));
+		} else if (totalCost && ctx.model && !ctx.modelRegistry.isUsingOAuth(ctx.model)) {
+			parts.push(`$${totalCost.toFixed(3)}`);
 		}
 
 		const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
@@ -295,10 +486,15 @@ export default function statusFooter(pi: ExtensionAPI) {
 	function installFooter(ctx: ExtensionContext) {
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			const dispose = footerData.onBranchChange(() => tui.requestRender());
+			const requestRender = () => tui.requestRender();
+			requestFooterRender = requestRender;
+			const unsubscribe = footerData.onBranchChange(requestRender);
 			const getSessionStats = createSessionStatsGetter(ctx);
 			return {
-				dispose,
+				dispose() {
+					unsubscribe();
+					if (requestFooterRender === requestRender) requestFooterRender = undefined;
+				},
 				render(width: number) {
 					const sessionLabel = currentSessionName(ctx);
 					const cwdMaxWidth = Math.max(8, Math.min(40, Math.floor(width * 0.3)));
@@ -318,8 +514,52 @@ export default function statusFooter(pi: ExtensionAPI) {
 		});
 	}
 
+	pi.on("after_provider_response", (event, ctx) => {
+		if (ctx.mode !== "tui" || !isCodexSubscription(ctx)) return;
+		const headers = Object.fromEntries(Object.entries(event.headers).map(([key, value]) => [key.toLowerCase(), value]));
+		const window = (name: string) => subscriptionWindow(
+			headers[`x-codex-${name}-used-percent`],
+			headers[`x-codex-${name}-window-minutes`],
+			headers[`x-codex-${name}-reset-at`],
+		);
+		updateCodexUsage({ primary: window("primary"), secondary: window("secondary") });
+	});
+
+	// WebSocket responses do not expose HTTP headers; Codex sends quota updates in the stream instead.
+	pi.on("provider_stream_event", (event, ctx) => {
+		if (ctx.mode !== "tui" || event.provider !== "openai-codex" || !isCodexSubscription(ctx)) return;
+		if (!event.data || typeof event.data !== "object") return;
+		const data = event.data as Record<string, unknown>;
+		if (data.type !== "codex.rate_limits") return;
+		const limit = data.metered_limit_name ?? data.limit_name;
+		if (limit !== undefined && limit !== null && limit !== "codex") return;
+		if (!data.rate_limits || typeof data.rate_limits !== "object") return;
+		const limits = data.rate_limits as Record<string, unknown>;
+		updateCodexUsage({
+			primary: streamSubscriptionWindow(limits.primary),
+			secondary: streamSubscriptionWindow(limits.secondary),
+		});
+	});
+
 	pi.on("session_start", (_event, ctx) => {
+		resetCodexUsage();
+		quotaActive = true;
 		installFooter(ctx);
+		void refreshCodexUsage(ctx);
+	});
+
+	pi.on("model_select", (_event, ctx) => {
+		resetCodexUsage();
+		void refreshCodexUsage(ctx);
+	});
+
+	pi.on("before_agent_start", (_event, ctx) => {
+		// /login does not necessarily emit model_select. Check current credentials on the next prompt.
+		void refreshCodexUsage(ctx);
+	});
+
+	pi.on("agent_end", (_event, ctx) => {
+		void refreshCodexUsage(ctx);
 	});
 
 	pi.on("session_info_changed", (_event, ctx) => {
@@ -327,6 +567,8 @@ export default function statusFooter(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (event, ctx) => {
+		quotaActive = false;
+		resetCodexUsage();
 		if (ctx.mode !== "tui") return;
 		if (event.reason === "reload") return;
 		ctx.ui.setFooter(undefined);
