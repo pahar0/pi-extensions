@@ -19,6 +19,7 @@ Pi loads the extensions declared by the package manifest. If Pi is already runni
 | `ask-user`                | Adds an `ask_user` wizard for 1–10 multiple-choice questions with an always-available free-form answer. |
 | `autocomplete`            | Adds manual inline suggestions with `Alt+A`, an animated cursor, and `Tab`/`Escape` controls.           |
 | `codex-web-search`        | Adds structured `web_search`, `web_fetch`, `web_find`, and batched `web_run` tools with safe HTTP fallback.                      |
+| `diff`                    | Adds `/diff`: fullscreen unified Git review, inline/range notes, saved drafts, and feedback submission to Pi. |
 | `init`                    | Adds `/init` to survey a repository and create or improve project guidance in `AGENTS.md`.              |
 | `mutation-guard`          | Prompts for approval before file edits, writes, and risky shell mutations.                              |
 | `resource-manager`        | Adds commands for enabling, disabling, and uninstalling custom extensions and skills.                   |
@@ -33,4 +34,4 @@ See [Codex web tools](docs/codex-web-search.md) for access modes, batching, opti
 
 ### Development
 
-Run `npm run check` for TypeScript validation and `npm test` for the web-tool regression suite.
+Run `npm run check` for TypeScript validation and `npm test` for the regression suites.
