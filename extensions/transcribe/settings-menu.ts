@@ -1,7 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAvailableMicrophones, testMicrophonePermission } from "./audio.js";
 import { getCatalogModel } from "./catalog.js";
-import { chineseOutputSummary, isChineseLanguage } from "./chinese.js";
 import {
   chooseTranscriptionLanguage,
   transcriptionLanguageSummary,
@@ -9,7 +8,6 @@ import {
 import { runModelSelection } from "./onboarding.js";
 import {
   writeSettings,
-  type ChineseOutput,
   type MicrophoneSetting,
   type TranscribeSettings,
 } from "./settings.js";
@@ -31,22 +29,6 @@ function microphoneSummary(microphone: MicrophoneSetting): string {
   if (microphone.type === "system-default") return "System default";
   const duplicate = microphone.occurrence > 0 ? ` · device ${microphone.occurrence + 1}` : "";
   return `${microphone.name}${duplicate}`;
-}
-
-async function chooseChineseOutput(
-  ctx: ExtensionContext,
-  current: ChineseOutput,
-): Promise<ChineseOutput | undefined> {
-  const options: ChineseOutput[] = [
-    "simplified",
-    "traditional-taiwan",
-    "traditional-hong-kong",
-  ];
-  const selected = await ctx.ui.select(
-    `Chinese output · ${chineseOutputSummary(current)}`,
-    options.map(chineseOutputSummary),
-  );
-  return options.find((option) => chineseOutputSummary(option) === selected);
 }
 
 function microphonesEqual(left: MicrophoneSetting, right: MicrophoneSetting): boolean {
@@ -154,11 +136,6 @@ export async function showSettingsMenu(
       "Transcription language",
       transcriptionLanguageSummary(configured.transcriptionLanguage, model),
     );
-    const chineseOutputChoice = settingChoice(
-      theme,
-      "Chinese output",
-      chineseOutputSummary(configured.chineseOutput),
-    );
     const microphoneChoice = settingChoice(
       theme,
       "Microphone",
@@ -170,15 +147,10 @@ export async function showSettingsMenu(
       displayShortcut(configured.shortcut),
     );
     const showMicFix = micResult.status === "denied";
-    const showChineseOutput =
-      (configured.transcriptionLanguage !== "auto" &&
-        isChineseLanguage(configured.transcriptionLanguage)) ||
-      configured.preferredLanguages.some(isChineseLanguage);
     const choices = [
       ...(showMicFix ? ["⚠ Fix: open macOS microphone settings"] : []),
       modelChoice,
       languageChoice,
-      ...(showChineseOutput ? [chineseOutputChoice] : []),
       microphoneChoice,
       shortcutChoice,
       "Done",
@@ -197,7 +169,6 @@ export async function showSettingsMenu(
         shortcut: configured.shortcut,
         preferredLanguages: configured.preferredLanguages,
         transcriptionLanguage: configured.transcriptionLanguage,
-        chineseOutput: configured.chineseOutput,
         currentModelId: configured.model.id,
         microphone: configured.microphone,
         onPreferredLanguagesChange: async (preferredLanguages) => {
@@ -227,16 +198,6 @@ export async function showSettingsMenu(
         `Transcription language saved as ${transcriptionLanguageSummary(transcriptionLanguage, model)}`,
         "info",
       );
-      continue;
-    }
-    if (choice === chineseOutputChoice) {
-      const chineseOutput = await chooseChineseOutput(ctx, configured.chineseOutput);
-      if (!chineseOutput || chineseOutput === configured.chineseOutput) continue;
-
-      const updated: TranscribeSettings = { ...configured, chineseOutput };
-      await writeSettings(updated);
-      Object.assign(configured, updated);
-      ctx.ui.notify(`Chinese output saved as ${chineseOutputSummary(chineseOutput)}`, "info");
       continue;
     }
     if (choice === microphoneChoice) {

@@ -160,10 +160,17 @@ export default function statusFooter(pi: ExtensionAPI) {
 		};
 	}
 
+	function rollingSubscriptionWindow(used: unknown, minutes: unknown, reset: unknown): SubscriptionWindow | undefined {
+		const window = subscriptionWindow(used, minutes, reset);
+		// Codex sends 0%/0-minute/empty-reset placeholders when a rolling limit does not exist.
+		if (window?.usedPercent === 0 && window.windowMinutes === undefined && window.resetsAt === undefined) return undefined;
+		return window;
+	}
+
 	function streamSubscriptionWindow(value: unknown): SubscriptionWindow | undefined {
 		if (!value || typeof value !== "object") return undefined;
 		const window = value as Record<string, unknown>;
-		return subscriptionWindow(window.used_percent, window.window_minutes, window.reset_at);
+		return rollingSubscriptionWindow(window.used_percent, window.window_minutes, window.reset_at);
 	}
 
 	function updateCodexUsage(usage: CodexUsage, authoritative = false) {
@@ -199,7 +206,7 @@ export default function statusFooter(pi: ExtensionAPI) {
 		if (!value || typeof value !== "object") return undefined;
 		const window = value as Record<string, unknown>;
 		const seconds = finiteNumber(window.limit_window_seconds);
-		return subscriptionWindow(
+		return rollingSubscriptionWindow(
 			window.used_percent,
 			seconds !== undefined && seconds > 0 ? Math.ceil(seconds / 60) : undefined,
 			window.reset_at,
@@ -517,7 +524,7 @@ export default function statusFooter(pi: ExtensionAPI) {
 	pi.on("after_provider_response", (event, ctx) => {
 		if (ctx.mode !== "tui" || !isCodexSubscription(ctx)) return;
 		const headers = Object.fromEntries(Object.entries(event.headers).map(([key, value]) => [key.toLowerCase(), value]));
-		const window = (name: string) => subscriptionWindow(
+		const window = (name: string) => rollingSubscriptionWindow(
 			headers[`x-codex-${name}-used-percent`],
 			headers[`x-codex-${name}-window-minutes`],
 			headers[`x-codex-${name}-reset-at`],

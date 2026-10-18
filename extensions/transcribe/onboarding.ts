@@ -26,7 +26,6 @@ import {
   DEFAULT_MICROPHONE,
   settingsForModel,
   writeSettings,
-  type ChineseOutput,
   type MicrophoneSetting,
   type TranscribeSettings,
   type TranscriptionLanguage,
@@ -86,7 +85,6 @@ type ModelSelectionOptions = {
   shortcut?: string;
   preferredLanguages?: readonly string[];
   transcriptionLanguage?: TranscriptionLanguage;
-  chineseOutput?: ChineseOutput;
   currentModelId?: string;
   microphone?: MicrophoneSetting;
   onPreferredLanguagesChange?: (languages: string[]) => Promise<void>;
@@ -198,7 +196,6 @@ export async function runModelSelection(
         shortcut: options.shortcut ?? DEFAULT_SHORTCUT,
         preferredLanguages,
         transcriptionLanguage: options.transcriptionLanguage,
-        chineseOutput: options.chineseOutput,
         microphone: options.microphone ?? DEFAULT_MICROPHONE,
       });
       await writeSettings(settings);

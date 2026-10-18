@@ -19,16 +19,6 @@ export type MicrophoneSetting =
 
 export const DEFAULT_MICROPHONE: MicrophoneSetting = { type: "system-default" };
 
-export type ChineseOutput = "simplified" | "traditional-taiwan" | "traditional-hong-kong";
-
-function defaultChineseOutput(): ChineseOutput {
-  const locale = Intl.DateTimeFormat().resolvedOptions().locale;
-  const subtags = locale.toLowerCase().split("-");
-  if (subtags.includes("hk") || subtags.includes("mo")) return "traditional-hong-kong";
-  if (subtags.includes("tw") || subtags.includes("hant")) return "traditional-taiwan";
-  return "simplified";
-}
-
 /** "auto" asks a capable model to detect the language; otherwise this is a language code. */
 export type TranscriptionLanguage = string;
 
@@ -38,7 +28,6 @@ export type TranscribeSettings = {
   shortcut: string;
   preferredLanguages: string[];
   transcriptionLanguage: TranscriptionLanguage;
-  chineseOutput: ChineseOutput;
   microphone: MicrophoneSetting;
   model: {
     source: "catalog";
@@ -66,14 +55,6 @@ function normalizeLanguages(value: unknown): string[] | undefined {
   }
   const languages = [...new Set(value.map(canonicalLanguage).filter(Boolean))];
   return languages.length > 0 ? languages : undefined;
-}
-
-function validateChineseOutput(value: unknown): ChineseOutput {
-  return value === "simplified" ||
-    value === "traditional-taiwan" ||
-    value === "traditional-hong-kong"
-    ? value
-    : defaultChineseOutput();
 }
 
 function validateMicrophone(value: unknown): MicrophoneSetting | undefined {
@@ -145,7 +126,6 @@ function validateSettings(value: unknown): TranscribeSettings | undefined {
       model,
       preferredLanguages,
     ),
-    chineseOutput: validateChineseOutput(value.chineseOutput),
     microphone,
     model: {
       source: "catalog",
@@ -197,7 +177,6 @@ type ModelSettingsOptions = {
   shortcut?: string;
   preferredLanguages?: readonly string[];
   transcriptionLanguage?: TranscriptionLanguage;
-  chineseOutput?: ChineseOutput;
   microphone?: MicrophoneSetting;
 };
 
@@ -221,7 +200,6 @@ export function settingsForModel(
       model,
       preferredLanguages,
     ),
-    chineseOutput: options.chineseOutput ?? defaultChineseOutput(),
     microphone: { ...(options.microphone ?? DEFAULT_MICROPHONE) },
     model: { source: "catalog", id: modelId, path: modelPath },
   };

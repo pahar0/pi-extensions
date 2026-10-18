@@ -1,6 +1,4 @@
 import { TranscribeModel } from "transcribe-cpp";
-import { convertChineseOutput, isChineseLanguage } from "./chinese.js";
-import type { ChineseOutput } from "./settings.js";
 
 export interface TranscriptionBackend {
   prepare(): Promise<void>;
@@ -17,7 +15,6 @@ export class TranscribeCppBackend implements TranscriptionBackend {
   constructor(
     private readonly modelPath: string,
     private readonly language?: string,
-    private readonly chineseOutput: ChineseOutput = "simplified",
   ) {}
 
   async prepare(): Promise<void> {
@@ -59,10 +56,7 @@ export class TranscribeCppBackend implements TranscriptionBackend {
       timestamps: "none",
       ...(this.language ? { language: this.language } : {}),
     });
-    const text = result.text.trim();
-    return isChineseLanguage(result.language || this.language || "")
-      ? convertChineseOutput(text, this.chineseOutput)
-      : text;
+    return result.text.trim();
   }
 
   async dispose(): Promise<void> {

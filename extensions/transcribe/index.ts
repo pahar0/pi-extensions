@@ -79,7 +79,6 @@ export default function piTranscribe(pi: ExtensionAPI): void {
       shortcut: previous.shortcut,
       preferredLanguages: previous.preferredLanguages,
       transcriptionLanguage: previous.transcriptionLanguage,
-      chineseOutput: previous.chineseOutput,
       currentModelId: previous.model.id,
       microphone: previous.microphone,
     });
@@ -259,7 +258,6 @@ export default function piTranscribe(pi: ExtensionAPI): void {
       configured.transcriptionLanguage === "auto"
         ? undefined
         : configured.transcriptionLanguage,
-      configured.chineseOutput,
     );
     const preparation = backend.prepare();
     const active: ActiveRecording = { capture, backend, preparation, meter };
