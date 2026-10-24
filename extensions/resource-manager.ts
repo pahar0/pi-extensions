@@ -128,10 +128,6 @@ async function selectManagedResource(
 				const fixedColumnsWidth = 3 + 2 + 2 + statusWidth + 2 + scopeWidth + 2 + kindWidth;
 				const effectiveNameWidth = Math.max(1, innerWidth - fixedColumnsWidth);
 
-				const padPlain = (text: string, targetWidth: number): string => {
-					const truncated = truncateToWidth(text, Math.max(0, targetWidth), "");
-					return truncated + " ".repeat(Math.max(0, targetWidth - visibleWidth(truncated)));
-				};
 				const fit = (text: string, targetWidth: number): string => {
 					const truncated = truncateToWidth(text, Math.max(0, targetWidth), "");
 					return truncated + " ".repeat(Math.max(0, targetWidth - visibleWidth(truncated)));
@@ -163,10 +159,10 @@ async function selectManagedResource(
 				const headerLeft = ` ${theme.bold(theme.fg("accent", capitalize(config.plural)))}`;
 				const headerRight = theme.fg("dim", `${items.length} total · ${enabledCount} on · ${disabledCount} off `);
 				const columnHeader =
-					`     ${padPlain(nameHeader, effectiveNameWidth)}  ` +
-					`${padPlain(statusHeader, statusWidth)}  ` +
-					`${padPlain(scopeHeader, scopeWidth)}  ` +
-					padPlain(kindHeader, kindWidth);
+					`     ${fit(nameHeader, effectiveNameWidth)}  ` +
+					`${fit(statusHeader, statusWidth)}  ` +
+					`${fit(scopeHeader, scopeWidth)}  ` +
+					fit(kindHeader, kindWidth);
 				const panelBorder = theme.fg("borderMuted", "│");
 				const lines: string[] = [split(headerLeft, headerRight, outerWidth)];
 
@@ -192,13 +188,13 @@ async function selectManagedResource(
 					const selected = scrollOffset + index === selectedIndex;
 					const marker = selected ? theme.fg("accent", " ❯ ") : "   ";
 					const glyph = theme.fg(row.status === "ON" ? "success" : "dim", "■ ");
-					const namePlain = padPlain(row.name, effectiveNameWidth);
+					const namePlain = fit(row.name, effectiveNameWidth);
 					const name = row.status === "OFF"
 						? theme.fg("dim", namePlain)
 						: selected ? theme.fg("accent", namePlain) : theme.fg("text", namePlain);
-					const status = theme.fg(row.status === "ON" ? "success" : "dim", padPlain(row.status, statusWidth));
-					const scope = theme.fg(selected ? "accent" : "muted", padPlain(row.scope, scopeWidth));
-					const kind = theme.fg(selected ? "accent" : "dim", padPlain(row.kind, kindWidth));
+					const status = theme.fg(row.status === "ON" ? "success" : "dim", fit(row.status, statusWidth));
+					const scope = theme.fg(selected ? "accent" : "muted", fit(row.scope, scopeWidth));
+					const kind = theme.fg(selected ? "accent" : "dim", fit(row.kind, kindWidth));
 					lines.push(panelBorder + fit(`${marker}${glyph}${name}  ${status}  ${scope}  ${kind}`, innerWidth) + panelBorder);
 				}
 

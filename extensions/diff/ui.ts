@@ -91,7 +91,6 @@ export class DiffReviewScreen implements Component, Focusable {
   private sidebarCache?: { snapshot: ReviewSnapshot; rows: SidebarRow[] };
   private lastSidebarRows: SidebarRow[] = [];
   private lastDisplayRows: DisplayRow[] = [];
-  readonly ready: Promise<void>;
   private tui: TUI;
   private theme: Theme;
   private keybindings: KeybindingsManager;
@@ -115,7 +114,7 @@ export class DiffReviewScreen implements Component, Focusable {
       },
     }, { paddingX: 1 });
     this.editor.onSubmit = (value) => this.saveComment(value);
-    this.ready = this.selectFile(0);
+    void this.selectFile(0);
   }
 
   get focused(): boolean { return this.hasFocus; }

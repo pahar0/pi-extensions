@@ -55,9 +55,6 @@ const ASK_USER_PROMPT_GUIDELINES = [
   "For each ask_user question, provide 2-5 meaningful options and do not add a free-form option because ask_user appends it automatically.",
 ];
 
-// Spread keeps this source compatible with Pi versions that predate tool exposure.
-const ASK_USER_TOOL_EXPOSURE = { exposure: "model-only" as const };
-
 export function buildAskUserResultMessage(
   outcome:
     | { kind: "no-ui" }
@@ -297,7 +294,7 @@ function selectedOptionIndex(
 
 export default function askUser(pi: ExtensionAPI) {
   pi.registerTool({
-    ...ASK_USER_TOOL_EXPOSURE,
+    exposure: "model-only",
     name: "ask_user",
     label: "Ask User",
     description: ASK_USER_TOOL_DESCRIPTION,

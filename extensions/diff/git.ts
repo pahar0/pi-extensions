@@ -202,7 +202,6 @@ export async function prepareReview(snapshot: ReviewSnapshot, annotations: Annot
     : sourceForFile(snapshot, { repository: note.repository, path: note.path! }).root]));
   const roots = new Set(noteRepositories.values());
   const sources = reviewSources(snapshot).filter((source) => roots.has(source.root));
-  const selected = combineSnapshots(sources);
   const current = await collectReview(sources.map((source) => source.target), signal);
   const scopedReviews = new Map<string, ReviewSnapshot>();
   for (const root of new Set(noteRepositories.values())) {
@@ -231,7 +230,5 @@ export async function prepareReview(snapshot: ReviewSnapshot, annotations: Annot
   }).map((note) => note.id);
   return {
     prompt: buildPrompt(snapshot, annotations, staleIds),
-    staleIds,
-    treeChanged: current.id !== selected.id,
   };
 }

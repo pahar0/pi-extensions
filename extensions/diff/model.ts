@@ -89,8 +89,6 @@ export interface WorkspaceDraft {
 
 export interface PreparedReview {
   prompt: string;
-  staleIds: string[];
-  treeChanged: boolean;
 }
 
 export function digest(...parts: string[]): string {
