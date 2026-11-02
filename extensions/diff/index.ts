@@ -1,4 +1,4 @@
-// Last verified with Pi v1.3.0.
+// Last verified with Pi v1.5.0.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { collectReview } from "./git.ts";

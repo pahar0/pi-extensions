@@ -1,4 +1,4 @@
-// Last verified working with Pi v1.2.0
+// Last verified working with Pi v1.5.0
 /**
  * ask_user - Ask one or more multiple-choice questions in a bounded wizard.
  *
@@ -10,7 +10,7 @@
  * - Compact result history shows two questions; expand for all questions and descriptions
  */
 
-import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   Editor,
   type EditorTheme,
@@ -852,7 +852,7 @@ export default function askUser(pi: ExtensionAPI) {
       return new Text(text, 0, 0);
     },
 
-    renderResult(result, { expanded }, theme, _context) {
+    renderResult(result, { expanded }, theme, context) {
       const details = result.details as AskUserDetails | undefined;
       if (!details) {
         const first = result.content[0];
@@ -905,7 +905,7 @@ export default function askUser(pi: ExtensionAPI) {
       if (hiddenQuestionCount > 0) {
         lines.push(
           theme.fg("muted", `… ${hiddenQuestionCount} more question${hiddenQuestionCount === 1 ? "" : "s"} · `) +
-            keyHint("app.tools.expand", "to show all"),
+            context.keyHint("app.tools.expand", "to show all"),
         );
       }
       const text = new Text(lines.join("\n"), 0, 0);

@@ -1,4 +1,4 @@
-// Last verified working with Pi v1.4.0
+// Last verified working with Pi v1.5.0
 /**
  * Prompt assist: use Alt+A to suggest the next user message on an empty editor
  * or complete a non-empty draft. Suggestions are only generated on request.
