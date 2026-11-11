@@ -2,12 +2,14 @@
 /**
  * Prompt assist: use Alt+A to suggest the next user message on an empty editor
  * or complete a non-empty draft. Suggestions are only generated on request.
+ * Uses Codex GPT-6.1 Terra with reasoning off, independently of the chat model.
  * Matching typing consumes the ghost text; Tab accepts the rest into an editable draft.
  * Escape and other input cancel. Never auto-send.
  */
 
 import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
+import { hasApi } from "@earendil-works/pi-ai";
 import {
 	CustomEditor,
 	type ExtensionAPI,
@@ -27,6 +29,8 @@ import {
 } from "@earendil-works/pi-tui";
 
 const PROMPT_ASSIST_SHORTCUT = "alt+a";
+const SUGGESTION_PROVIDER = "openai-codex";
+const SUGGESTION_MODEL_ID = "gpt-6.1-terra";
 const SUGGESTION_TIMEOUT_MS = 30_000;
 const segmenter = new Intl.Segmenter();
 
@@ -139,8 +143,12 @@ export async function generateSuggestion(
 	ctx: ExtensionContext,
 	signal: AbortSignal,
 ): Promise<string> {
-	const model = ctx.model;
-	if (!model) throw new Error("No model is currently selected for suggestions");
+	const model = ctx.modelRegistry.find(SUGGESTION_PROVIDER, SUGGESTION_MODEL_ID);
+	if (!model) throw new Error(`Prompt-assist model ${SUGGESTION_PROVIDER}/${SUGGESTION_MODEL_ID} is unavailable`);
+	if (!hasApi(model, "openai-codex-responses")) throw new Error("Prompt assist requires the Codex Responses API");
+	if (model.thinkingLevelMap?.off === null) {
+		throw new Error(`Prompt-assist model ${SUGGESTION_PROVIDER}/${SUGGESTION_MODEL_ID} does not support disabling reasoning`);
+	}
 	const conversation = recentConversation(ctx);
 	if (kind === "next-message" && !conversation) return "";
 	const systemPrompt = kind === "completion" ? [
@@ -158,7 +166,7 @@ export async function generateSuggestion(
 		"The suggestion appears as ghost text; the user may accept, edit, or ignore it. Nothing is sent automatically.",
 	].join(" ");
 	// A separate provider session avoids sharing agent transport state. No tools or agent loop.
-	const response = await ctx.modelRegistry.streamSimple(model, {
+	const response = await ctx.modelRegistry.stream(model, {
 		systemPrompt,
 		tools: [],
 		messages: [{
@@ -168,7 +176,8 @@ export async function generateSuggestion(
 		}],
 	}, {
 		signal,
-		// Omitting reasoning in streamSimple requests no thinking, using each provider's supported form.
+		// Explicit Codex no-reasoning setting, independent of the main chat's thinking level.
+		reasoningEffort: "none",
 		toolChoice: "none",
 		maxTokens: 512,
 		sessionId: `pi-prompt-assist-${randomUUID()}`,
